@@ -23,7 +23,53 @@ Codex is the preferred reviewer. Gemini CLI, Claude Code, OpenCode, and a custom
 
 Run `node plugins/codex-review-loop/skills/review-until-clean/scripts/review-loop.mjs doctor` to inspect local availability.
 
-## Harness setup
+## Quick start
+
+### Claude Code
+
+```sh
+claude plugin marketplace add DheerG/codex-review-loop
+claude plugin install codex-review-loop@codex-review-loop --scope user
+```
+
+Restart Claude Code, then invoke:
+
+```text
+/codex-review-loop:review-until-clean make this branch ready to ship
+```
+
+### Codex
+
+```sh
+codex plugin marketplace add DheerG/codex-review-loop
+```
+
+Install `codex-review-loop` from that marketplace in the Codex plugin UI, then invoke:
+
+```text
+$codex-review-loop:review-until-clean make this branch ready to ship
+```
+
+### OpenCode, Gemini CLI, and other Agent Skills harnesses
+
+Clone the repository once:
+
+```sh
+git clone https://github.com/DheerG/codex-review-loop.git
+cd codex-review-loop
+```
+
+Then install the entry points you need:
+
+```sh
+node plugins/codex-review-loop/scripts/install.mjs --harness opencode
+node plugins/codex-review-loop/scripts/install.mjs --harness gemini
+node plugins/codex-review-loop/scripts/install.mjs --harness agents
+```
+
+Use `--harness all` to install all three. Existing targets are preserved unless `--force` is supplied. To update, pull a release tag or the latest `main` and rerun the installer with `--force`.
+
+## Development setup
 
 ### Claude Code
 
@@ -39,7 +85,7 @@ Invoke:
 /codex-review-loop:review-until-clean make this branch ready to ship
 ```
 
-The repository also contains `.claude-plugin/marketplace.json` for marketplace distribution.
+The repository contains `.claude-plugin/marketplace.json` for public marketplace distribution.
 
 ### Codex
 
@@ -55,7 +101,7 @@ Install `codex-review-loop` from that marketplace in the Codex plugin UI, then i
 $codex-review-loop:review-until-clean make this branch ready to ship
 ```
 
-The plugin uses the standard `.codex-plugin/plugin.json` plus `skills/` layout.
+The plugin uses the standard `.codex-plugin/plugin.json` plus `skills/` layout and is catalogued by `.agents/plugins/marketplace.json`.
 
 ### OpenCode
 
@@ -175,9 +221,28 @@ The exception never waives whitespace or commit-message quality failures.
 ```sh
 npm test
 npm run validate
+npm run version:check
 ```
 
 The implementation has no runtime dependencies.
+
+## Releases
+
+Every merge to `main` receives a SemVer bump, immutable `v<version>` tag, and GitHub Release. The merged pull request controls the bump:
+
+- `major` label: increment the major version;
+- `minor` label: increment the minor version;
+- no release label: increment the patch version.
+
+The release workflow synchronizes `package.json`, both plugin manifests, and both marketplace entries before tagging. CI rejects version drift.
+
+Repository setup:
+
+1. Create the `major` and `minor` pull-request labels.
+2. Give GitHub Actions read/write repository permission.
+3. Permit `github-actions[bot]` to push its version-only commit to `main`. If branch rules do not allow that, add a write-capable `DEPLOY_KEY` repository secret, as used by the checkout step.
+
+The workflow can be recovered manually from the Actions tab with an optional merge commit SHA. Tags are never force-moved.
 
 ## License
 

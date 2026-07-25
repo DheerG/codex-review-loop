@@ -9,7 +9,10 @@
   },
   "scripts": {
     "test": "node --test",
-    "validate": "node --check plugins/codex-review-loop/skills/review-until-clean/scripts/review-loop.mjs && node --test"
+    "validate:package": "node scripts/validate-package.mjs",
+    "version:check": "node scripts/release-version.mjs check",
+    "version:set": "node scripts/release-version.mjs set",
+    "validate": "node --check plugins/codex-review-loop/skills/review-until-clean/scripts/review-loop.mjs && node --check plugins/codex-review-loop/scripts/install.mjs && npm run validate:package && npm run version:check && node --test"
   },
   "engines": {
     "node": ">=18"

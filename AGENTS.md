@@ -6,4 +6,6 @@
 - Store runtime state below the target repository's Git directory; do not add project files.
 - Do not add timers, hooks, daemons, cron jobs, or heartbeat behavior.
 - Product code and Git history describe product behavior, not reviewer rounds or AI attribution.
-- Run `npm test` and both plugin validators before delivery.
+- Keep the five release versions synchronized with `npm run version:check`; use
+  `npm run version:set -- <semver>` when changing them locally.
+- Run `npm run validate` and both plugin validators before delivery.

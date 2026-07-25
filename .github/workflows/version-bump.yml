@@ -1,0 +1,107 @@
+name: Bump version on merge
+
+# Squash merges copy PR commit bodies into the merge commit. A literal CI-skip
+# token anywhere in that body suppresses this workflow; workflow_dispatch is
+# the recovery path when that happens.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      pr_sha:
+        description: "Merge commit SHA to attribute the bump to (defaults to current HEAD)."
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ssh-key: ${{ secrets.DEPLOY_KEY }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Validate release source
+        run: npm run validate
+
+      - name: Select version bump
+        id: bump
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_PR_SHA: ${{ inputs.pr_sha }}
+        run: |
+          CURRENT=$(node scripts/release-version.mjs get)
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+
+          LOOKUP_SHA="${INPUT_PR_SHA:-$GITHUB_SHA}"
+          PR_NUMBER=$(gh pr list --state merged --base main --limit 100 \
+            --json number,mergeCommit \
+            --jq ".[] | select(.mergeCommit.oid == \"$LOOKUP_SHA\") | .number")
+
+          BUMP="patch"
+          if [ -n "$PR_NUMBER" ]; then
+            LABELS=$(gh pr view "$PR_NUMBER" --json labels --jq '.labels[].name')
+            if echo "$LABELS" | grep -qx "major"; then
+              BUMP="major"
+            elif echo "$LABELS" | grep -qx "minor"; then
+              BUMP="minor"
+            fi
+          fi
+
+          case "$BUMP" in
+            major) NEW_VERSION="$((MAJOR + 1)).0.0" ;;
+            minor) NEW_VERSION="${MAJOR}.$((MINOR + 1)).0" ;;
+            patch) NEW_VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))" ;;
+          esac
+
+          if git rev-parse --verify --quiet "refs/tags/v${NEW_VERSION}"; then
+            echo "Tag v${NEW_VERSION} already exists; refusing to move it." >&2
+            exit 1
+          fi
+
+          echo "version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "bump=${BUMP}" >> "$GITHUB_OUTPUT"
+
+      - name: Synchronize version declarations
+        env:
+          NEW_VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          node scripts/release-version.mjs set "$NEW_VERSION"
+          npm run validate
+          git diff --check
+
+      - name: Commit and tag
+        env:
+          NEW_VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add package.json \
+            .agents/plugins/marketplace.json \
+            .claude-plugin/marketplace.json \
+            plugins/codex-review-loop/.codex-plugin/plugin.json \
+            plugins/codex-review-loop/.claude-plugin/plugin.json
+          git commit -m "Bump version to ${NEW_VERSION} [skip ci]"
+          git tag "v${NEW_VERSION}"
+          git push origin main
+          git push origin "v${NEW_VERSION}"
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEW_VERSION: ${{ steps.bump.outputs.version }}
+        run: gh release create "v${NEW_VERSION}" --verify-tag --generate-notes
