@@ -1,0 +1,21 @@
+{
+  "name": "codex-review-loop",
+  "version": "0.1.0",
+  "description": "Run an independent, provider-selectable review and repair loop until the current Git scope is clean.",
+  "author": {
+    "name": "Dheer Gupta",
+    "email": "noreply@dheer.co"
+  },
+  "license": "MIT",
+  "keywords": ["review", "codex", "git", "quality"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Review Until Clean",
+    "shortDescription": "Independent review and repair until clean.",
+    "longDescription": "Reviews the complete Git change scope with Codex or another provider, guides in-scope repairs, re-reviews until clean, and checks code and Git hygiene before delivery.",
+    "developerName": "Dheer Gupta",
+    "category": "Developer Tools",
+    "capabilities": ["Read", "Write", "Interactive"],
+    "defaultPrompt": "Run the independent review loop on my current changes and keep going until the reviewer reports no in-scope functional findings."
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "name": "codex-review-loop",
+  "description": "Independent review loops for multiple coding harnesses.",
+  "owner": {
+    "name": "Dheer Gupta",
+    "email": "noreply@dheer.co"
+  },
+  "plugins": [
+    {
+      "name": "codex-review-loop",
+      "description": "Review the complete Git scope with Codex or another provider, repair findings, and repeat until clean.",
+      "version": "0.1.0",
+      "source": {
+        "source": "local",
+        "path": "./plugins/codex-review-loop"
+      },
+      "policy": {
+        "when_enabled": {
+          "context": true,
+          "skills": true
+        }
+      }
+    }
+  ]
+}

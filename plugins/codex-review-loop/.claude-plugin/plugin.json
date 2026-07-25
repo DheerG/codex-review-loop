@@ -1,0 +1,11 @@
+{
+  "name": "codex-review-loop",
+  "version": "0.1.0",
+  "description": "Independent, provider-selectable review and repair until the current Git scope is clean.",
+  "author": {
+    "name": "Dheer Gupta",
+    "email": "noreply@dheer.co"
+  },
+  "license": "MIT",
+  "keywords": ["review", "codex", "git", "quality"]
+}

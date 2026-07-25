@@ -1,0 +1,9 @@
+description = "Independently review the complete Git scope and repair it until clean"
+prompt = """
+Read ~/.agents/skills/review-until-clean/SKILL.md and follow it exactly, including its linked references.
+
+Treat the following text as outcome, base-ref, provider, or plan-mode hints:
+{{args}}
+
+If the current mode is read-only, add the skill's required execution step to the plan instead of claiming to run it.
+"""

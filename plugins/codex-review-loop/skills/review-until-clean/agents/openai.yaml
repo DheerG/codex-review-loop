@@ -1,0 +1,4 @@
+interface:
+  display_name: "Review Until Clean"
+  short_description: "Independent review and repair until clean"
+  default_prompt: "Use $review-until-clean to review my complete current Git scope, repair in-scope functional findings, and repeat until the reviewer returns a valid clean result."
