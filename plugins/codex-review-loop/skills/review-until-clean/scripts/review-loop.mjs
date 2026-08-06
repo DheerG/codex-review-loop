@@ -35,6 +35,7 @@ const DEFAULT_COMMIT_SECTIONS = ["Failure", "Change", "Verification"];
 const CODEX_REVIEW_DISABLED_FEATURES = [
   "hooks",
   "codex_hooks",
+  "plugin_hooks",
   "apps",
   "plugins",
   "multi_agent",
@@ -324,18 +325,27 @@ function reflogCovers(root, ref, startedAt) {
 
 function pinPersistedBase(root, state) {
   const base = normalizeRef(state.base);
-  const resolved = resolveBase(root, base);
-  if (base === resolved || isUnambiguousObjectPrefix(root, base, resolved)) {
-    return resolved;
-  }
   const headRelative = base.match(
     /^HEAD(?<suffix>(?:(?:~\d*|\^\d*)+)?)$/u,
   );
-  if (headRelative && refExists(root, state.initialHead)) {
+  if (headRelative) {
+    if (
+      typeof state.initialHead !== "string" ||
+      !refExists(root, state.initialHead)
+    ) {
+      throw new CliError(
+        `Cannot safely recover stored HEAD-relative comparison base ${base}.`,
+        2,
+      );
+    }
     return resolveBase(
       root,
       `${state.initialHead}${headRelative.groups.suffix}`,
     );
+  }
+  const resolved = resolveBase(root, base);
+  if (base === resolved || isUnambiguousObjectPrefix(root, base, resolved)) {
+    return resolved;
   }
 
   const startedAt = new Date(state.startedAt);
@@ -2066,15 +2076,27 @@ function isVerbatimVerificationCommand(line) {
   const trimmed = line.trim();
   const bullet = trimmed.match(/^[-*]\s+(.+)/u);
   return (
-    (bullet && !startsWithWorkflowAttribution(bullet[1])) ||
+    (bullet &&
+      (!hasWorkflowAttribution(bullet[1]) ||
+        hasUnambiguousShellSyntax(bullet[1]))) ||
     /^\$\s+\S/u.test(trimmed) ||
     /^`[^`]+`$/u.test(trimmed)
   );
 }
 
-function startsWithWorkflowAttribution(text) {
-  return WORKFLOW_ATTRIBUTION_PATTERNS.some(
-    (pattern) => pattern.exec(text)?.index === 0,
+function hasWorkflowAttribution(text) {
+  return WORKFLOW_ATTRIBUTION_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+function hasUnambiguousShellSyntax(text) {
+  return (
+    /^\$\s+\S/u.test(text) ||
+    /^`[^`]+`$/u.test(text) ||
+    /^(?:\/|\.\/|\.\.\/|~\/)/u.test(text) ||
+    /(?:^|\s)(?:--?[A-Za-z0-9]|[A-Za-z_][A-Za-z0-9_]*=)/u.test(text) ||
+    /(?:^|\s)(?:&&|\|\||[|;<>])(?:\s|$)/u.test(text) ||
+    /["'`]/u.test(text) ||
+    /\\\s*$/u.test(text)
   );
 }
 

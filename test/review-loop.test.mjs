@@ -268,6 +268,7 @@ test("Codex preserves allowlisted preferences and has no default round cap", () 
   assert.equal(defaultArgs.includes("guardian_approval"), true);
   assert.equal(defaultArgs.includes("guardianv2"), true);
   assert.equal(defaultArgs.includes("codex_hooks"), true);
+  assert.equal(defaultArgs.includes("plugin_hooks"), true);
   assert.equal(reviewRoundLimit("codex", undefined), null);
   assert.equal(reviewRoundLimit("custom", undefined), 15);
   assert.equal(reviewRoundLimit("codex", "7"), 7);
@@ -513,11 +514,13 @@ test("Codex feature probing adapts to supported flags and fails closed", () => {
   const parsed = parseCodexFeatureList(`
 hooks                              stable             true
 codex_hooks                        stable             true
+plugin_hooks                       stable             true
 apps                               stable             true
 multi_agent                        stable             true
 `);
   assert.equal(parsed.get("hooks"), true);
   assert.equal(parsed.get("codex_hooks"), true);
+  assert.equal(parsed.get("plugin_hooks"), true);
   assert.equal(parsed.has("multi_agent_v2"), false);
 
   const calls = [];
@@ -531,6 +534,7 @@ multi_agent                        stable             true
         [
           "hooks",
           "codex_hooks",
+          "plugin_hooks",
           "apps",
           "multi_agent_mode",
           "collaboration_modes",
@@ -545,6 +549,7 @@ multi_agent                        stable             true
   assert.deepEqual(disabled, [
     "hooks",
     "codex_hooks",
+    "plugin_hooks",
     "apps",
     "multi_agent_mode",
     "collaboration_modes",
@@ -752,6 +757,7 @@ test("check-commit-message validates a proposed repair commit", (t) => {
   for (const attributionBullet of [
     "- Reviewed by Codex",
     "- Address OpenCode review feedback",
+    "- Tests suggested by Codex all passed",
   ]) {
     result = invoke(
       directory,
@@ -1278,9 +1284,12 @@ test("legacy base migration preserves immutable revisions and rejects ambiguous 
   legacy.schemaVersion = 2;
   legacy.base = "HEAD~1";
   writeFileSync(activeFile, `${JSON.stringify(legacy, null, 2)}\n`);
+  writeFileSync(path.join(directory, "app.js"), "export const value = 2;\n");
+  git(directory, "checkout", "-q", "--detach", originalParent);
   result = invoke(directory, env, "status");
   assert.equal(result.status, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).state.base, originalParent);
+  git(directory, "checkout", "-q", originalBranch);
 
   legacy = JSON.parse(readFileSync(activeFile, "utf8"));
   legacy.schemaVersion = 2;
