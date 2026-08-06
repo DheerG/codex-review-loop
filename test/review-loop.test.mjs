@@ -170,6 +170,8 @@ test("Codex preserves user configuration and has no default round cap", () => {
     "exec",
     "--sandbox",
     "read-only",
+    "--disable",
+    "hooks",
     "review",
     "--ephemeral",
     "-",
@@ -178,6 +180,8 @@ test("Codex preserves user configuration and has no default round cap", () => {
     "exec",
     "--sandbox",
     "read-only",
+    "--disable",
+    "hooks",
     "review",
     "--ephemeral",
     "--ignore-user-config",
@@ -410,6 +414,7 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "Handle review requests",
     "Implement reviewer recommendations",
     "Reviewer requested retry preservation",
+    "Codex review requested retry preservation",
     "Record review round 2",
     "Codex-assisted retry fix",
     "Reviewed by Codex",
@@ -482,6 +487,31 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     narrativeCommitBody,
     "--product-terms",
     "The repository runs Codex review as product behavior",
+  );
+  assert.equal(result.status, 0, result.stderr);
+
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
+    "Preserve tool calls Codex requested",
+    "--body",
+    narrativeCommitBody,
+  );
+  assert.equal(result.status, 2);
+  assert.match(result.stdout, /AI-workflow attribution/u);
+
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
+    "Preserve tool calls Codex requested",
+    "--body",
+    narrativeCommitBody,
+    "--product-terms",
+    "The repository stores provider tool calls as product data",
   );
   assert.equal(result.status, 0, result.stderr);
 
