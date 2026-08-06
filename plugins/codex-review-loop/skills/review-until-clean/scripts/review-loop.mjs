@@ -1079,12 +1079,14 @@ export function codexManagedHazardsFromToml(
       ) {
         hazards.add("notify");
       }
-    } else if (
-      parts.length === 1 &&
-      ["sandbox_mode", "default_permissions"].includes(parts[0])
-    ) {
+    } else if (parts.length === 1 && parts[0] === "sandbox_mode") {
       const value = tomlStringValue(record.value ?? "", source);
-      if (!["read-only", ":read-only"].includes(value)) hazards.add(parts[0]);
+      if (value !== "read-only") hazards.add(parts[0]);
+    } else if (parts.length === 1 && parts[0] === "default_permissions") {
+      const value = tomlStringValue(record.value ?? "", source);
+      // Unprefixed permission names may resolve to a user-defined profile.
+      // Only Codex's built-in read-only profile is safe to accept here.
+      if (value !== ":read-only") hazards.add(parts[0]);
     } else if (
       parts[0] === "features" &&
       CODEX_REVIEW_DISABLED_FEATURES.includes(parts[1])
@@ -2013,21 +2015,21 @@ async function reviewCommand(repo, env) {
 }
 
 const PRODUCT_TERM_PATTERNS = [
-  /\b(?:codex|claude|gemini|chatgpt|openai|anthropic)\b.{0,50}\b(?:review|reviewer|feedback|findings?|comments?|loop|suggestions?|requests?|recommendations?|instructions?|guidance)\b/iu,
-  /\b(?:review|reviewer|feedback|findings?|comments?|loop|suggestions?|requests?|recommendations?|instructions?|guidance)\b.{0,50}\b(?:codex|claude|gemini|chatgpt|openai|anthropic)\b/iu,
-  /\b(?:after|during|from|following)\s+(?:(?:the|a)\s+)?(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?(?:review|reviewer)\b/iu,
-  /\b(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+(?:found|identified|reported|flagged|raised|caught|suggested|requested|required)\b/iu,
+  /\b(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\b.{0,50}\b(?:review|reviewer|feedback|findings?|comments?|loop|suggestions?|requests?|recommendations?|instructions?|guidance)\b/iu,
+  /\b(?:review|reviewer|feedback|findings?|comments?|loop|suggestions?|requests?|recommendations?|instructions?|guidance)\b.{0,50}\b(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\b/iu,
+  /\b(?:after|during|from|following)\s+(?:(?:the|a)\s+)?(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?(?:review|reviewer)\b/iu,
+  /\b(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+(?:found|identified|reported|flagged|raised|caught|suggested|requested|required)\b/iu,
 ];
 
 const WORKFLOW_ATTRIBUTION_PATTERNS = [
-  /\b(?:reviewed|generated|suggested|assisted|authored|written|created|made|produced)\s+(?:by|with)\s+(?:(?:an?|the)\s+)?(?:codex|claude|gemini|chatgpt|openai|anthropic|ai|llm|reviewer)\b/iu,
-  /\b(?:(?:an?|the)\s+)?(?:codex|claude|gemini|chatgpt|openai|anthropic|ai|llm|reviewer)[\s-]+(?:reviewed|generated|suggested|assisted|authored|written|created|made|produced)\b/iu,
-  /\b(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance)\s+(?:from|by)\s+(?:(?:an?|the)\s+)?(?:codex|claude|gemini|chatgpt|openai|anthropic|ai|llm|reviewer)\b/iu,
-  /\b(?:found|identified|reported|flagged|raised|caught|suggested|requested|required)\s+(?:by|during|in|from|through)\s+(?:(?:the|a)\s+)?(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?(?:review|reviewer|feedback|findings?|comments?)|(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu,
-  /\b(?:based\s+on|because\s+of|prompted\s+by|in\s+response\s+to)\s+(?:(?:the|a)\s+)?(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?(?:review|reviewer|feedback|findings?|comments?)|(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu,
-  /\bper\s+(?:(?:the|a)\s+(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?(?:review|reviewer|feedback|findings?|comments?)|(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))|(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?review(?:er)?\s+(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu,
-  /\bfollowing\s+(?:(?:the|a)\s+)?(?:(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?review(?:er)?\s+)?(?:feedback|findings?|comments?)|(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?review(?:er)?|(?:codex|claude|gemini|chatgpt|openai|anthropic))\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu,
-  /\b(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?review(?:er)?\s+(?:asked|requested|required|suggested|said|recommended|instructed|flagged|identified)\b/iu,
+  /\b(?:reviewed|generated|suggested|assisted|authored|written|created|made|produced)\s+(?:by|with)\s+(?:(?:an?|the)\s+)?(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode|ai|llm|reviewer)\b/iu,
+  /\b(?:(?:an?|the)\s+)?(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode|ai|llm|reviewer)[\s-]+(?:reviewed|generated|suggested|assisted|authored|written|created|made|produced)\b/iu,
+  /\b(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance)\s+(?:from|by)\s+(?:(?:an?|the)\s+)?(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode|ai|llm|reviewer)\b/iu,
+  /\b(?:found|identified|reported|flagged|raised|caught|suggested|requested|required)\s+(?:by|during|in|from|through)\s+(?:(?:the|a)\s+)?(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?(?:review|reviewer|feedback|findings?|comments?)|(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu,
+  /\b(?:based\s+on|because\s+of|prompted\s+by|in\s+response\s+to)\s+(?:(?:the|a)\s+)?(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?(?:review|reviewer|feedback|findings?|comments?)|(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu,
+  /\bper\s+(?:(?:the|a)\s+(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?(?:review|reviewer|feedback|findings?|comments?)|(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))|(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?review(?:er)?\s+(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu,
+  /\bfollowing\s+(?:(?:the|a)\s+)?(?:(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?review(?:er)?\s+)?(?:feedback|findings?|comments?)|(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?review(?:er)?|(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode))\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu,
+  /\b(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?review(?:er)?\s+(?:asked|requested|required|suggested|said|recommended|instructed|flagged|identified)\b/iu,
   /\b(?:(?:an?|the)\s+)?(?:(?:ai|llm)(?:\s+review(?:er)?)?|review(?:er)?)\s+(?:found|identified|reported|flagged|raised|caught|suggested|requested|required)\b/iu,
   /\b(?:found|identified|reported|flagged|raised|caught|suggested|requested|required)\s+(?:by|during|in|from|through)\s+(?:(?:an?|the)\s+)?(?:(?:ai|llm)(?:\s+review(?:er)?)?|review(?:er)?)\b/iu,
   /\b(?:address(?:es|ed|ing)?|appl(?:y|ies|ied|ying)|fix(?:es|ed|ing)?|resolv(?:e|es|ed|ing)|handl(?:e|es|ed|ing)|incorporat(?:e|es|ed|ing)|implement(?:s|ed|ing)?|clos(?:e|es|ed|ing)|clear(?:s|ed|ing)?|tackl(?:e|es|ed|ing)|satisf(?:y|ies|ied|ying))\s+(?:the\s+)?(?:(?:ai|llm)(?:\s+review(?:er)?)?|review(?:er)?)\s+(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance)\b/iu,
@@ -2078,23 +2080,52 @@ function isVerbatimVerificationCommand(line) {
   );
 }
 
-function longCommitProseLine(body) {
+function verificationEvidenceLines(body) {
+  const evidence = new Set();
   let section = null;
+  let commandContinues = false;
   const lines = body.split(/\r?\n/u);
-  return lines.findIndex((line) => {
+  for (const [index, line] of lines.entries()) {
     const heading = line.trim().match(
       /^(Failure|Change|Rationale|Verification):\s*$/u,
     );
-    if (heading) section = heading[1];
-    return (
-      line.length > 100 &&
-      !(section === "Verification" && isVerbatimVerificationCommand(line))
-    );
-  });
+    if (heading) {
+      section = heading[1];
+      commandContinues = false;
+      continue;
+    }
+    if (section !== "Verification") continue;
+    if (isVerbatimVerificationCommand(line)) {
+      evidence.add(index);
+      commandContinues = true;
+    } else if (commandContinues && /^\s+\S/u.test(line)) {
+      evidence.add(index);
+    } else {
+      commandContinues = false;
+    }
+  }
+  return evidence;
+}
+
+function commitProseBody(body) {
+  const evidence = verificationEvidenceLines(body);
+  return body
+    .split(/\r?\n/u)
+    .filter((_, index) => !evidence.has(index))
+    .join("\n");
+}
+
+function longCommitProseLine(body) {
+  const evidence = verificationEvidenceLines(body);
+  const lines = body.split(/\r?\n/u);
+  return lines.findIndex(
+    (line, index) => line.length > 100 && !evidence.has(index),
+  );
 }
 
 function inspectCommitMessageWithPolicy(subject, body, options) {
   const issues = [];
+  const proseBody = commitProseBody(body);
   if (!subject.trim()) {
     issues.push("subject is empty");
   }
@@ -2102,7 +2133,7 @@ function inspectCommitMessageWithPolicy(subject, body, options) {
     issues.push("subject must be a single line");
   }
   if (
-    /\b(?:address(?:es|ed|ing)?|appl(?:y|ies|ied|ying)|fix(?:es|ed|ing)?|resolv(?:e|es|ed|ing)|handl(?:e|es|ed|ing)|incorporat(?:e|es|ed|ing)|implement(?:s|ed|ing)?|clos(?:e|es|ed|ing)|clear(?:s|ed|ing)?|tackl(?:e|es|ed|ing)|satisf(?:y|ies|ied|ying))\s+(?:the\s+)?(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?review(?:er)?\s+(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance)\b/iu.test(
+    /\b(?:address(?:es|ed|ing)?|appl(?:y|ies|ied|ying)|fix(?:es|ed|ing)?|resolv(?:e|es|ed|ing)|handl(?:e|es|ed|ing)|incorporat(?:e|es|ed|ing)|implement(?:s|ed|ing)?|clos(?:e|es|ed|ing)|clear(?:s|ed|ing)?|tackl(?:e|es|ed|ing)|satisf(?:y|ies|ied|ying))\s+(?:the\s+)?(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?review(?:er)?\s+(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance)\b/iu.test(
       subject,
     ) ||
     /\b(?:review(?:er)?[ -]?round|codex fixes|claude fixes|ai review)\b/iu.test(
@@ -2111,18 +2142,18 @@ function inspectCommitMessageWithPolicy(subject, body, options) {
   ) {
     issues.push("subject describes the review workflow instead of product behavior");
   }
-  if (hasAttribution(`${subject}\n${body}`, options.allowProductTerms)) {
+  if (hasAttribution(`${subject}\n${proseBody}`, options.allowProductTerms)) {
     issues.push("message contains reviewer or AI-workflow attribution");
   }
   if (
-    /\b(?:to satisfy|in response to|as requested by|based\s+on|because\s+of|prompted\s+by)\s+(?:the\s+)?(?:(?:review|reviewer|feedback|findings?|comments?)|(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?review(?:er)?\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance)|(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu.test(
-      body,
+    /\b(?:to satisfy|in response to|as requested by|based\s+on|because\s+of|prompted\s+by)\s+(?:the\s+)?(?:(?:review|reviewer|feedback|findings?|comments?)|(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?review(?:er)?\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance)|(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu.test(
+      proseBody,
     ) ||
-    /\bfollowing\s+(?:the\s+)?(?:(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?review(?:er)?\s+)?(?:feedback|findings?|comments?)|(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?review(?:er)?|(?:codex|claude|gemini|chatgpt|openai|anthropic))\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu.test(
-      body,
+    /\bfollowing\s+(?:the\s+)?(?:(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?review(?:er)?\s+)?(?:feedback|findings?|comments?)|(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?review(?:er)?|(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode))\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu.test(
+      proseBody,
     ) ||
-    /\b(?:(?:review|reviewer|feedback|findings?|comments?)|(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?review(?:er)?\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance)|(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))\s+(?:asked|requested|required|suggested|said)\b/iu.test(
-      body,
+    /\b(?:(?:review|reviewer|feedback|findings?|comments?)|(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?review(?:er)?\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance)|(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))\s+(?:asked|requested|required|suggested|said)\b/iu.test(
+      proseBody,
     )
   ) {
     issues.push(
@@ -2130,7 +2161,7 @@ function inspectCommitMessageWithPolicy(subject, body, options) {
     );
   }
   if (
-    /^(?:co-authored-by|reviewed-by|assisted-by|generated-by):.*(?:codex|claude|gemini|chatgpt|openai|anthropic|\bai\b|\bllm\b)/imu.test(
+    /^(?:co-authored-by|reviewed-by|assisted-by|generated-by):.*(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode|\bai\b|\bllm\b)/imu.test(
       body,
     )
   ) {

@@ -49,7 +49,7 @@ Verification:
 - <exact test or command actually run>
 ```
 
-`Rationale:` is optional. `Failure:`, `Change:`, and `Verification:` are required by the default. For several related defects, use one scenario-and-resolution bullet per behavior. Put unrelated root causes in separate commits. Keep the tone factual rather than defensive and prose body lines to at most 100 characters. Preserve verbatim commands in `Verification:` even when a command exceeds that prose limit. Do not copy priority labels or reviewer prose into history; translate useful information into product failure, behavior, rationale, and evidence.
+`Rationale:` is optional. `Failure:`, `Change:`, and `Verification:` are required by the default. For several related defects, use one scenario-and-resolution bullet per behavior. Put unrelated root causes in separate commits. Keep the tone factual rather than defensive and prose body lines to at most 100 characters. Preserve verbatim commands in `Verification:`, including indented continuation lines, even when they exceed that prose limit or contain product test names that resemble attribution language. Do not copy priority labels or reviewer prose into history; translate useful information into product failure, behavior, rationale, and evidence.
 
 Check the proposed message before creating the repair commit:
 

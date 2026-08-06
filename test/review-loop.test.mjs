@@ -367,6 +367,20 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
     [],
   );
   assert.deepEqual(
+    codexManagedHazardsFromToml('default_permissions = "read-only"'),
+    ["default_permissions"],
+  );
+  assert.deepEqual(
+    codexManagedHazardsFromToml('default_permissions = ":read-only"'),
+    [],
+  );
+  assert.deepEqual(
+    codexManagedHazardsFromToml(
+      'default_permissions = "read-only"\n[permissions.read-only]\nextends = "workspace-write"',
+    ),
+    ["default_permissions"],
+  );
+  assert.deepEqual(
     codexManagedHazardsFromToml(
       "[features]\nmulti_agent_mode = true",
     ),
@@ -719,10 +733,36 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "subject",
   );
   assert.equal(result.status, 0, result.stderr);
+
   const effectivePolicy = JSON.parse(result.stdout);
   assert.equal(effectivePolicy.policy.mode, "override");
   assert.equal(effectivePolicy.policy.source, "CONTRIBUTING.md");
   assert.deepEqual(effectivePolicy.policy.overrides, ["subject"]);
+
+  const longContinuation = `  --test-name-pattern="${"preserve exact provider evidence ".repeat(5).trim()}"`;
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
+    "Preserve multiline verification evidence",
+    "--body",
+    `${narrativeCommitBody}\n- node --test \\\n${longContinuation}`,
+  );
+  assert.equal(result.status, 0, result.stderr);
+
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
+    "Preserve exact product test names",
+    "--body",
+    `${narrativeCommitBody}\n- node --test --test-name-pattern="reject per reviewer feedback"`,
+    "--product-terms",
+    "The command verifies the repository's reviewer-product behavior",
+  );
+  assert.equal(result.status, 0, result.stderr);
 
   const productFrequencyBody = narrativeCommitBody.replace(
     "Preserve the terminal failure across retry boundaries for batch and streaming callers.",
@@ -903,8 +943,7 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "--body",
     productCommitBody,
   );
-  assert.equal(result.status, 2);
-  assert.match(result.stdout, /AI-workflow attribution/u);
+  assert.equal(result.status, 0, result.stderr);
 
   result = invoke(
     directory,
@@ -936,6 +975,7 @@ test("check-commit-message validates a proposed repair commit", (t) => {
 
   for (const subject of [
     "Address Codex review feedback",
+    "Address OpenCode review feedback",
     "Apply retry guard found during Codex review",
     "Resolve review feedback",
     "Resolved reviewer comments",
