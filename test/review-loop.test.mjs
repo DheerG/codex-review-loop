@@ -149,8 +149,12 @@ test("Codex accepts explicit native clean language without weakening other provi
     assert.equal(parseReview(contradiction, "codex").status, "invalid");
   }
   assert.equal(
-    parseReview("No potential issues remain.", "codex").status,
+    parseReview("No issues remain.", "codex").status,
     "clean",
+  );
+  assert.equal(
+    parseReview("No material issues found.", "codex").status,
+    "invalid",
   );
   assert.equal(
     parseReview(
@@ -295,16 +299,16 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "fix(retries): preserve terminal provider errors",
     "--body",
     narrativeCommitBody,
-    "--repository-policy",
+    "--policy",
     "CONTRIBUTING.md",
-    "--repository-overrides",
+    "--policy-overrides",
     "subject",
   );
   assert.equal(result.status, 0, result.stderr);
-  const repositoryPolicy = JSON.parse(result.stdout);
-  assert.equal(repositoryPolicy.policy.mode, "repository");
-  assert.equal(repositoryPolicy.policy.source, "CONTRIBUTING.md");
-  assert.deepEqual(repositoryPolicy.policy.overrides, ["subject"]);
+  const effectivePolicy = JSON.parse(result.stdout);
+  assert.equal(effectivePolicy.policy.mode, "override");
+  assert.equal(effectivePolicy.policy.source, "CONTRIBUTING.md");
+  assert.deepEqual(effectivePolicy.policy.overrides, ["subject"]);
 
   result = invoke(
     directory,
@@ -312,9 +316,9 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "check-commit-message",
     "--subject",
     "Preserve terminal provider errors",
-    "--repository-policy",
-    "CONTRIBUTING.md",
-    "--repository-overrides",
+    "--policy",
+    "User instruction: omit commit bodies",
+    "--policy-overrides",
     "body",
   );
   assert.equal(result.status, 0, result.stderr);
@@ -325,9 +329,9 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "check-commit-message",
     "--subject",
     "Cleanup.",
-    "--repository-policy",
+    "--policy",
     "CONTRIBUTING.md",
-    "--repository-overrides",
+    "--policy-overrides",
     "body",
   );
   assert.equal(result.status, 2);
@@ -339,9 +343,9 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "check-commit-message",
     "--subject",
     "fix(retries): preserve terminal provider errors",
-    "--repository-policy",
+    "--policy",
     "CONTRIBUTING.md",
-    "--repository-overrides",
+    "--policy-overrides",
     "subject",
   );
   assert.equal(result.status, 2);
@@ -390,6 +394,9 @@ test("check-commit-message validates a proposed repair commit", (t) => {
   for (const subject of [
     "Address Codex review feedback",
     "Apply retry guard found during Codex review",
+    "Resolve review feedback",
+    "Resolved reviewer comments",
+    "Incorporating review findings",
     "Record review round 2",
     "Codex-assisted retry fix",
     "Reviewed by Codex",
@@ -400,9 +407,9 @@ test("check-commit-message validates a proposed repair commit", (t) => {
       "check-commit-message",
       "--subject",
       subject,
-      "--repository-policy",
+      "--policy",
       "CONTRIBUTING.md",
-      "--repository-overrides",
+      "--policy-overrides",
       "all",
       "--product-terms",
       "The repository ships reviewer integrations",
@@ -482,6 +489,53 @@ test("clean finish never audits or rewrites existing commit messages", (t) => {
     git(directory, "log", "-1", "--format=%s"),
     "Address Codex review feedback",
   );
+});
+
+test("legacy clean state requires a new review under the current verdict contract", (t) => {
+  const { directory, provider } = repositoryFixture(t);
+  const env = reviewEnvironment(provider, "NO_IN_SCOPE_FUNCTIONAL_FINDINGS");
+  let result = invoke(
+    directory,
+    env,
+    "start",
+    "--provider",
+    "custom",
+    "--base",
+    "HEAD",
+    "--outcome",
+    "Update the exported value",
+  );
+  assert.equal(result.status, 0, result.stderr);
+  result = invoke(directory, env, "review");
+  assert.equal(result.status, 0, result.stderr);
+
+  const storage = git(
+    directory,
+    "rev-parse",
+    "--path-format=absolute",
+    "--git-path",
+    "codex-review-loop",
+  );
+  const activeFile = path.join(storage, "active.json");
+  const legacy = JSON.parse(readFileSync(activeFile, "utf8"));
+  legacy.schemaVersion = 1;
+  writeFileSync(activeFile, `${JSON.stringify(legacy, null, 2)}\n`);
+
+  result = invoke(directory, env, "status");
+  assert.equal(result.status, 0, result.stderr);
+  const migrated = JSON.parse(result.stdout);
+  assert.equal(migrated.state.phase, "invalid");
+  assert.equal(migrated.state.lastReview.status, "invalid");
+  assert.match(migrated.state.lastReview.reason, /predates the current verdict/u);
+
+  result = invoke(directory, env, "finish", "--reason", "clean");
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /latest valid review is not clean/u);
+
+  result = invoke(directory, env, "review");
+  assert.equal(result.status, 0, result.stderr);
+  result = invoke(directory, env, "finish", "--reason", "clean");
+  assert.equal(result.status, 0, result.stderr);
 });
 
 test("one review command consumes exactly one invalid round", (t) => {

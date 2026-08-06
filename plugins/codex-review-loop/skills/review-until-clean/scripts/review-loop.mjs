@@ -21,6 +21,7 @@ import { fileURLToPath } from "node:url";
 
 const PROVIDERS = ["auto", "codex", "gemini", "claude", "opencode", "custom"];
 const CLEAN_SENTINEL = "NO_IN_SCOPE_FUNCTIONAL_FINDINGS";
+const STATE_SCHEMA_VERSION = 2;
 const DEFAULT_FALLBACK_MAX_ROUNDS = 15;
 const DEFAULT_TIMEOUT_MS = 1_200_000;
 const MAX_CAPTURE_BYTES = 64 * 1024 * 1024;
@@ -114,7 +115,21 @@ function loadActive(repo) {
     throw new CliError("No active review loop. Start one with `start`.", 2);
   }
   const state = readJson(repo.activeFile);
-  if (state.schemaVersion !== 1) {
+  if (state.schemaVersion === 1) {
+    state.schemaVersion = STATE_SCHEMA_VERSION;
+    if (state.phase === "clean" || state.lastReview?.status === "clean") {
+      state.phase = "invalid";
+      state.lastReview = {
+        ...state.lastReview,
+        status: "invalid",
+        reason:
+          "The clean result predates the current verdict contract. Review the unchanged snapshot again.",
+      };
+    }
+    saveActive(repo, state);
+    return state;
+  }
+  if (state.schemaVersion !== STATE_SCHEMA_VERSION) {
     throw new CliError(`Unsupported state schema: ${state.schemaVersion}`, 2);
   }
   return state;
@@ -493,9 +508,9 @@ function providerErrorKind(result) {
 
 function codexExplicitClean(text) {
   const patterns = [
-    /^no\s+(?:(?:in-scope|actionable|functional|material|potential|remaining)\s+){0,3}(?:findings?|defects?|issues?|bugs?)(?:\s+(?:(?:were\s+)?(?:found|identified|detected)|remains?))?[.!]?$/iu,
-    /^(?:i\s+)?(?:found|identified|detected)\s+no\s+(?:(?:in-scope|actionable|functional|material)\s+){0,3}(?:findings?|defects?|issues?|bugs?)[.!]?$/iu,
-    /^(?:i\s+)?(?:did\s+not|didn't)\s+(?:find|identify|detect)\s+(?:any\s+)?(?:(?:in-scope|actionable|functional|material)\s+){0,3}(?:findings?|defects?|issues?|bugs?)[.!]?$/iu,
+    /^no\s+(?:(?:in-scope\s+functional|actionable)\s+)?(?:findings?|defects?|issues?|bugs?)(?:\s+(?:(?:were\s+)?(?:found|identified|detected)|remains?))?[.!]?$/iu,
+    /^(?:i\s+)?(?:found|identified|detected)\s+no\s+(?:(?:in-scope\s+functional|actionable)\s+)?(?:findings?|defects?|issues?|bugs?)[.!]?$/iu,
+    /^(?:i\s+)?(?:did\s+not|didn't)\s+(?:find|identify|detect)\s+(?:any\s+)?(?:(?:in-scope\s+functional|actionable)\s+)?(?:findings?|defects?|issues?|bugs?)[.!]?$/iu,
   ];
   const lines = text
     .split(/\r?\n/u)
@@ -663,7 +678,7 @@ async function startCommand(repo, options, env) {
   const provider = chooseProvider(requestedProvider, env);
   const now = new Date().toISOString();
   const state = {
-    schemaVersion: 1,
+    schemaVersion: STATE_SCHEMA_VERSION,
     runId: `${now.slice(0, 10)}-${randomUUID()}`,
     phase: "active",
     root: repo.root,
@@ -921,7 +936,7 @@ function inspectCommitMessageWithPolicy(subject, body, options) {
     issues.push("subject is empty");
   }
   if (
-    /\b(?:address|apply|fix)(?:es|ed|ing)?\s+(?:the\s+)?(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?review(?:er)?\s+(?:feedback|findings?|comments?)\b/iu.test(
+    /\b(?:address(?:es|ed|ing)?|appl(?:y|ies|ied|ying)|fix(?:es|ed|ing)?|resolv(?:e|es|ed|ing)|handl(?:e|es|ed|ing)|incorporat(?:e|es|ed|ing)|implement(?:s|ed|ing)?|clos(?:e|es|ed|ing)|clear(?:s|ed|ing)?|tackl(?:e|es|ed|ing)|satisf(?:y|ies|ied|ying))\s+(?:the\s+)?(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?review(?:er)?\s+(?:feedback|findings?|comments?)\b/iu.test(
       subject,
     ) ||
     /\b(?:review(?:er)?[ -]?round|codex fixes|claude fixes|ai review)\b/iu.test(
@@ -1003,17 +1018,17 @@ function checkCommitMessageCommand(options) {
         "utf8",
       ).trim()
     : options.body?.trim() ?? "";
-  const repositoryPolicy = options["repository-policy"]?.trim();
-  const repositoryOverrides = options["repository-overrides"]?.trim();
-  if (repositoryOverrides && !repositoryPolicy) {
+  const policySource = options["policy"]?.trim();
+  const policyOverrides = options["policy-overrides"]?.trim();
+  if (policyOverrides && !policySource) {
     throw new CliError(
-      "--repository-overrides requires --repository-policy <source>.",
+      "--policy-overrides requires --policy <source>.",
       2,
     );
   }
   const overriddenFields = new Set();
-  if (repositoryOverrides) {
-    for (const field of repositoryOverrides.split(",")) {
+  if (policyOverrides) {
+    for (const field of policyOverrides.split(",")) {
       const normalized = field.trim().toLowerCase();
       if (normalized === "all") {
         overriddenFields.add("subject");
@@ -1022,7 +1037,7 @@ function checkCommitMessageCommand(options) {
         overriddenFields.add(normalized);
       } else {
         throw new CliError(
-          "--repository-overrides must be subject, body, all, or a comma-separated combination.",
+          "--policy-overrides must be subject, body, all, or a comma-separated combination.",
           2,
         );
       }
@@ -1037,13 +1052,13 @@ function checkCommitMessageCommand(options) {
   return {
     status: issues.length === 0 ? "clean" : "issues",
     subject,
-    policy: repositoryPolicy
+    policy: policySource
       ? {
-          mode: "repository",
-          source: repositoryPolicy,
+          mode: "override",
+          source: policySource,
           overrides: [...overriddenFields].sort(),
           note:
-            "Repository guidance controls only the named fields; defaults and prospective-only safeguards remain active elsewhere.",
+            "User or repository guidance controls only the named fields; defaults and prospective-only safeguards remain active elsewhere.",
         }
       : {
           mode: "default",
@@ -1136,14 +1151,14 @@ Usage:
   codex-review-loop review [--json]
   codex-review-loop check-commit-message --subject <text>
                           [--body <text> | --body-file <path>]
-                          [--repository-policy <source>]
-                          [--repository-overrides subject,body|all]
+                          [--policy <source>]
+                          [--policy-overrides subject,body|all]
                           [--product-terms <justification>] [--json]
   codex-review-loop finish --reason clean|out-of-scope|stopped [--json]
 
 All repository commands accept --cwd <path>. Runtime state is stored below the
 target repository's Git directory. check-commit-message only validates a proposed
-message; it never inspects or changes Git history. Without a repository-policy
+message; it never inspects or changes Git history. Without an explicit policy
 field override, new messages use the default subject rules plus Failure, Change,
 and Verification sections. No background process or heartbeat is used.
 --product-terms permits legitimate product-domain names without permitting
