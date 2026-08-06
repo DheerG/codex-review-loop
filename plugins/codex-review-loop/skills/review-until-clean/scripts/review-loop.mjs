@@ -4,12 +4,16 @@ import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
   accessSync,
+  closeSync,
   constants,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
+  readSync,
   readlinkSync,
   renameSync,
   rmSync,
@@ -26,6 +30,7 @@ const STATE_SCHEMA_VERSION = 3;
 const DEFAULT_FALLBACK_MAX_ROUNDS = 15;
 const DEFAULT_TIMEOUT_MS = 1_200_000;
 const MAX_CAPTURE_BYTES = 64 * 1024 * 1024;
+const MAX_CODEX_CONFIG_BYTES = 1024 * 1024;
 const DEFAULT_COMMIT_SECTIONS = ["Failure", "Change", "Verification"];
 const CODEX_REVIEW_DISABLED_FEATURES = [
   "hooks",
@@ -76,6 +81,74 @@ function run(command, args, options = {}) {
 
 function git(cwd, args, options = {}) {
   return run("git", args, { cwd, allowFailure: options.allowFailure });
+}
+
+export function readBoundedCodexConfig(file) {
+  let before;
+  try {
+    before = lstatSync(file);
+  } catch (error) {
+    throw new CliError(
+      `Cannot safely inspect Codex configuration at ${file}: ${error.message}`,
+      3,
+    );
+  }
+  if (before.isSymbolicLink() || !before.isFile()) {
+    throw new CliError(
+      `Codex configuration must be a regular non-symlink file: ${file}.`,
+      3,
+    );
+  }
+  if (before.size > MAX_CODEX_CONFIG_BYTES) {
+    throw new CliError(
+      `Codex configuration exceeds ${MAX_CODEX_CONFIG_BYTES} bytes: ${file}.`,
+      3,
+    );
+  }
+
+  let descriptor;
+  try {
+    descriptor = openSync(file, constants.O_RDONLY);
+    const opened = fstatSync(descriptor);
+    if (
+      !opened.isFile() ||
+      opened.dev !== before.dev ||
+      opened.ino !== before.ino
+    ) {
+      throw new CliError(
+        `Codex configuration changed while it was inspected: ${file}.`,
+        3,
+      );
+    }
+    const buffer = Buffer.alloc(MAX_CODEX_CONFIG_BYTES + 1);
+    let total = 0;
+    while (total < buffer.length) {
+      const count = readSync(
+        descriptor,
+        buffer,
+        total,
+        buffer.length - total,
+        null,
+      );
+      if (count === 0) break;
+      total += count;
+    }
+    if (total > MAX_CODEX_CONFIG_BYTES) {
+      throw new CliError(
+        `Codex configuration exceeds ${MAX_CODEX_CONFIG_BYTES} bytes: ${file}.`,
+        3,
+      );
+    }
+    return buffer.subarray(0, total).toString("utf8");
+  } catch (error) {
+    if (error instanceof CliError) throw error;
+    throw new CliError(
+      `Cannot safely read Codex configuration at ${file}: ${error.message}`,
+      3,
+    );
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
 }
 
 function repository(cwd = process.cwd()) {
@@ -219,7 +292,13 @@ function isUnambiguousObjectPrefix(root, value, resolved) {
   });
   if (candidates.status !== 0) return false;
   const objects = candidates.stdout.split(/\r?\n/u).filter(Boolean);
-  return objects.length === 1 && objects[0] === resolved;
+  if (objects.length !== 1) return false;
+  const peeled = git(
+    root,
+    ["rev-parse", "--verify", "--quiet", `${objects[0]}^{commit}`],
+    { allowFailure: true },
+  );
+  return peeled.status === 0 && peeled.stdout.trim() === resolved;
 }
 
 function reflogCovers(root, ref, startedAt) {
@@ -232,9 +311,11 @@ function reflogCovers(root, ref, startedAt) {
     .filter(Boolean)
     .map(Number)
     .filter(Number.isFinite);
+  const startSecond = Math.floor(startedAt.valueOf() / 1_000);
   return (
     timestamps.length > 0 &&
-    Math.min(...timestamps) <= Math.floor(startedAt.valueOf() / 1_000)
+    Math.min(...timestamps) < startSecond &&
+    !timestamps.includes(startSecond)
   );
 }
 
@@ -244,8 +325,14 @@ function pinPersistedBase(root, state) {
   if (base === resolved || isUnambiguousObjectPrefix(root, base, resolved)) {
     return resolved;
   }
-  if (base === "HEAD" && refExists(root, state.initialHead)) {
-    return resolveBase(root, state.initialHead);
+  const headRelative = base.match(
+    /^HEAD(?<suffix>(?:(?:~\d*|\^\d*)+)?)$/u,
+  );
+  if (headRelative && refExists(root, state.initialHead)) {
+    return resolveBase(
+      root,
+      `${state.initialHead}${headRelative.groups.suffix}`,
+    );
   }
 
   const startedAt = new Date(state.startedAt);
@@ -370,8 +457,9 @@ function codexAvailability(env, context = undefined) {
     isolateCodexConfig: Boolean(context?.isolateCodexConfig),
   };
   try {
-    codexFeaturesForReview(state, env, context?.storage);
     codexMcpServersForReview(state, env);
+    codexReviewPreferencesForReview(state, env);
+    codexFeaturesForReview(state, env, context?.storage);
     return { available: true };
   } catch (error) {
     return { available: false, reason: error.message };
@@ -519,6 +607,12 @@ export function codexMcpDisableOverride(servers) {
   return Object.keys(disabled).length > 0
     ? `mcp_servers=${tomlInlineValue(disabled)}`
     : null;
+}
+
+function codexProjectUntrustedOverride(root) {
+  return `projects=${tomlInlineValue({
+    [path.resolve(root)]: { trust_level: "untrusted" },
+  })}`;
 }
 
 function stripTomlComment(line) {
@@ -843,50 +937,6 @@ export function codexSelectedLegacyProfileFromToml(
   return codexConfigRecords(contents, source).selectedLegacyProfile;
 }
 
-export function codexProjectTrustFromToml(
-  contents,
-  projectRoot,
-  source = "Codex config",
-) {
-  const expected = path.resolve(projectRoot);
-  let trust = null;
-  for (const record of codexConfigRecords(contents, source).records) {
-    if (
-      record.parts.length !== 3 ||
-      record.parts[0] !== "projects" ||
-      record.parts[2] !== "trust_level" ||
-      !path.isAbsolute(record.parts[1])
-    ) {
-      continue;
-    }
-    const configured = path.resolve(record.parts[1]);
-    const sameProject =
-      process.platform === "win32"
-        ? configured.toLowerCase() === expected.toLowerCase()
-        : configured === expected;
-    if (!sameProject) continue;
-    const value = tomlStringValue(record.value ?? "", source);
-    if (!["trusted", "untrusted"].includes(value)) {
-      throw new CliError(`Cannot parse project trust in ${source}.`, 3);
-    }
-    trust = value;
-  }
-  return trust;
-}
-
-export function codexProjectConfigIsTrusted(configs, projectRoot) {
-  let trust = null;
-  for (const config of configs) {
-    const configuredTrust = codexProjectTrustFromToml(
-      config.contents,
-      projectRoot,
-      config.file,
-    );
-    if (configuredTrust !== null) trust = configuredTrust;
-  }
-  return trust === "trusted";
-}
-
 function activeCodexRecordParts(record, options, localSelectedProfile) {
   if (record.parts[0] !== "profiles") return record.parts;
   const selectedProfile = Object.hasOwn(options, "selectedLegacyProfile")
@@ -900,6 +950,66 @@ function activeCodexRecordParts(record, options, localSelectedProfile) {
     return record.parts.slice(2);
   }
   return null;
+}
+
+export function codexReviewPreferencesFromToml(
+  contents,
+  source = "Codex user config",
+  options = {},
+) {
+  const { records, selectedLegacyProfile } = codexConfigRecords(
+    contents,
+    source,
+  );
+  const preferences = {};
+  for (const record of records) {
+    const parts = activeCodexRecordParts(
+      record,
+      options,
+      selectedLegacyProfile,
+    );
+    if (
+      parts?.length === 1 &&
+      ["model", "model_reasoning_effort"].includes(parts[0])
+    ) {
+      preferences[parts[0]] = tomlStringValue(record.value ?? "", source);
+    }
+  }
+  return preferences;
+}
+
+export function codexPromptHazardsFromToml(
+  contents,
+  source = "Codex config",
+  options = {},
+) {
+  const { records, selectedLegacyProfile } = codexConfigRecords(
+    contents,
+    source,
+  );
+  const hazards = new Set();
+  const promptKeys = new Set([
+    "compact_prompt",
+    "developer_instructions",
+    "experimental_compact_prompt_file",
+    "experimental_instructions_file",
+    "instructions",
+    "model_instructions_file",
+  ]);
+  for (const record of records) {
+    const parts = activeCodexRecordParts(
+      record,
+      options,
+      selectedLegacyProfile,
+    );
+    if (!parts) continue;
+    if (parts.length === 1 && promptKeys.has(parts[0])) {
+      hazards.add(parts[0]);
+    } else if (parts[0] === "auto_review" && parts[1] === "policy") {
+      hazards.add("auto_review.policy");
+    }
+  }
+  return [...hazards].sort();
 }
 
 export function codexMcpNamesFromToml(
@@ -962,7 +1072,16 @@ export function codexManagedHazardsFromToml(
         throw new CliError(`Cannot parse a managed feature in ${source}.`, 3);
       }
       if (value === "true") hazards.add(`features.${parts[1]}`);
+    } else if (
+      parts[0] === "projects" &&
+      parts.at(-1) === "trust_level" &&
+      tomlStringValue(record.value ?? "", source) === "trusted"
+    ) {
+      hazards.add("projects.*.trust_level");
     }
+  }
+  for (const hazard of codexPromptHazardsFromToml(contents, source, options)) {
+    hazards.add(hazard);
   }
   return [...hazards].sort();
 }
@@ -1024,7 +1143,14 @@ function codexManagedPreference(env) {
   if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(encoded)) {
     throw new CliError("Managed Codex preferences contain invalid base64.", 3);
   }
-  return Buffer.from(encoded, "base64").toString("utf8");
+  const decoded = Buffer.from(encoded, "base64");
+  if (decoded.length > MAX_CODEX_CONFIG_BYTES) {
+    throw new CliError(
+      `Managed Codex preferences exceed ${MAX_CODEX_CONFIG_BYTES} bytes.`,
+      3,
+    );
+  }
+  return decoded.toString("utf8");
 }
 
 function assertManagedCodexConfigSafe(
@@ -1051,7 +1177,7 @@ function assertManagedCodexConfigSafe(
   }
 }
 
-function configuredCodexMcpServers(state, env) {
+function codexUsesLegacyProfiles(state, env) {
   const version = run("codex", ["--version"], {
     cwd: state.root,
     env,
@@ -1061,36 +1187,24 @@ function configuredCodexMcpServers(state, env) {
   if (version.status !== 0 || !versionMatch) {
     throw new CliError("Cannot determine Codex profile compatibility.", 3);
   }
-  const legacyProfiles =
-    Number(versionMatch[1]) === 0 && Number(versionMatch[2]) < 134;
-  const ordinary = [
-    codexSystemConfig(env),
-    ...(state.isolateCodexConfig
-      ? []
-      : [path.join(codexHome(env), "config.toml")]),
-  ].filter(Boolean);
+  return Number(versionMatch[1]) === 0 && Number(versionMatch[2]) < 134;
+}
+
+function codexConfigFile(file) {
+  if (!file || !existsSync(file)) return null;
+  return { contents: readBoundedCodexConfig(file), file };
+}
+
+function configuredCodexMcpServers(state, env) {
+  const legacyProfiles = codexUsesLegacyProfiles(state, env);
   const ordinaryConfigs = [];
-  for (const file of ordinary) {
-    if (!existsSync(file)) continue;
-    let contents;
-    try {
-      contents = readFileSync(file, "utf8");
-    } catch (error) {
-      throw new CliError(
-        `Cannot safely read Codex MCP configuration at ${file}: ${error.message}`,
-        3,
-      );
-    }
-    ordinaryConfigs.push({ contents, file });
-  }
+  const systemConfig = codexConfigFile(codexSystemConfig(env));
+  if (systemConfig) ordinaryConfigs.push(systemConfig);
 
   const managedConfigs = [];
   for (const managedFile of codexManagedConfigPaths(env)) {
-    if (!existsSync(managedFile)) continue;
-    managedConfigs.push({
-      contents: readFileSync(managedFile, "utf8"),
-      file: managedFile,
-    });
+    const config = codexConfigFile(managedFile);
+    if (config) managedConfigs.push(config);
   }
   const managedPreference = codexManagedPreference(env);
   if (managedPreference) {
@@ -1098,27 +1212,6 @@ function configuredCodexMcpServers(state, env) {
       contents: managedPreference,
       file: "managed Codex preferences",
     });
-  }
-
-  const projectConfig = path.join(state.root, ".codex", "config.toml");
-  if (
-    codexProjectConfigIsTrusted(
-      [...ordinaryConfigs, ...managedConfigs],
-      state.root,
-    ) &&
-    existsSync(projectConfig)
-  ) {
-    try {
-      ordinaryConfigs.push({
-        contents: readFileSync(projectConfig, "utf8"),
-        file: projectConfig,
-      });
-    } catch (error) {
-      throw new CliError(
-        `Cannot safely read Codex MCP configuration at ${projectConfig}: ${error.message}`,
-        3,
-      );
-    }
   }
 
   let selectedLegacyProfile = null;
@@ -1134,6 +1227,17 @@ function configuredCodexMcpServers(state, env) {
   const options = { legacyProfiles, selectedLegacyProfile };
   const names = new Set();
   for (const config of ordinaryConfigs) {
+    const promptHazards = codexPromptHazardsFromToml(
+      config.contents,
+      config.file,
+      options,
+    );
+    if (promptHazards.length > 0) {
+      throw new CliError(
+        `Cannot safely isolate prompt-affecting Codex settings from ${config.file}: ${promptHazards.join(", ")}.`,
+        3,
+      );
+    }
     for (const name of codexMcpNamesFromToml(
       config.contents,
       config.file,
@@ -1155,10 +1259,29 @@ function configuredCodexMcpServers(state, env) {
   return [...names].sort();
 }
 
+function configuredCodexReviewPreferences(state, env) {
+  if (state.isolateCodexConfig) return {};
+  const userConfig = codexConfigFile(path.join(codexHome(env), "config.toml"));
+  if (!userConfig) return {};
+  return codexReviewPreferencesFromToml(
+    userConfig.contents,
+    userConfig.file,
+    { legacyProfiles: codexUsesLegacyProfiles(state, env) },
+  );
+}
+
 export function codexMcpServersForReview(
   state,
   env,
   inventory = configuredCodexMcpServers,
+) {
+  return inventory(state, env);
+}
+
+export function codexReviewPreferencesForReview(
+  state,
+  env,
+  inventory = configuredCodexReviewPreferences,
 ) {
   return inventory(state, env);
 }
@@ -1179,7 +1302,12 @@ export function parseCodexFeatureList(output) {
 }
 
 function runCodexFeatureList(root, env, disabledFeatures = []) {
-  const args = ["features", "list"];
+  const args = [
+    "features",
+    "list",
+    "-c",
+    codexProjectUntrustedOverride(root),
+  ];
   for (const feature of disabledFeatures) args.push("--disable", feature);
   const result = run("codex", args, {
     cwd: root,
@@ -1202,19 +1330,16 @@ export function codexFeaturesForReview(
   storage,
   inventory = runCodexFeatureList,
 ) {
-  let temporaryHome = null;
-  let probeEnv = env;
-  if (state.isolateCodexConfig) {
-    if (!storage) {
-      throw new CliError(
-        "Cannot isolate Codex configuration without Git-local runtime storage.",
-        3,
-      );
-    }
+  let temporaryHome;
+  if (storage) {
     mkdirSync(storage, { recursive: true });
     temporaryHome = mkdtempSync(path.join(storage, "codex-config-probe-"));
-    probeEnv = { ...env, CODEX_HOME: temporaryHome };
+  } else {
+    temporaryHome = mkdtempSync(
+      path.join(os.tmpdir(), "codex-review-loop-config-probe-"),
+    );
   }
+  const probeEnv = { ...env, CODEX_HOME: temporaryHome };
   try {
     const supported = inventory(state.root, probeEnv);
     const disabled = CODEX_REVIEW_DISABLED_FEATURES.filter((feature) =>
@@ -1230,7 +1355,7 @@ export function codexFeaturesForReview(
     }
     return disabled;
   } finally {
-    if (temporaryHome) rmSync(temporaryHome, { recursive: true, force: true });
+    rmSync(temporaryHome, { recursive: true, force: true });
   }
 }
 
@@ -1238,9 +1363,28 @@ export function codexReviewArgs(
   isolateUserConfig = false,
   mcpServers = [],
   disabledFeatures = CODEX_REVIEW_DISABLED_FEATURES,
+  reviewConfig = {},
 ) {
   const mcpOverride = codexMcpDisableOverride(mcpServers);
-  const args = ["exec", "--sandbox", "read-only"];
+  const preferences = isolateUserConfig
+    ? {}
+    : (reviewConfig.preferences ?? {});
+  const args = [
+    "exec",
+    "--sandbox",
+    "read-only",
+    "--ignore-user-config",
+    "--ignore-rules",
+    "-c",
+    codexProjectUntrustedOverride(reviewConfig.root ?? process.cwd()),
+  ];
+  if (preferences.model) args.push("--model", preferences.model);
+  if (preferences.model_reasoning_effort) {
+    args.push(
+      "-c",
+      `model_reasoning_effort=${tomlInlineValue(preferences.model_reasoning_effort)}`,
+    );
+  }
   for (const feature of disabledFeatures) args.push("--disable", feature);
   args.push(
     "-c",
@@ -1248,7 +1392,6 @@ export function codexReviewArgs(
     ...(mcpOverride ? ["-c", mcpOverride] : []),
     "review",
     "--ephemeral",
-    ...(isolateUserConfig ? ["--ignore-user-config"] : []),
     "-",
   );
   return args;
@@ -1257,6 +1400,8 @@ export function codexReviewArgs(
 function providerInvocation(state, prompt, env, repo) {
   switch (state.provider) {
     case "codex": {
+      const mcpServers = codexMcpServersForReview(state, env);
+      const preferences = codexReviewPreferencesForReview(state, env);
       const disabledFeatures = codexFeaturesForReview(
         state,
         env,
@@ -1266,8 +1411,9 @@ function providerInvocation(state, prompt, env, repo) {
         command: "codex",
         args: codexReviewArgs(
           Boolean(state.isolateCodexConfig),
-          codexMcpServersForReview(state, env),
+          mcpServers,
           disabledFeatures,
+          { root: state.root, preferences },
         ),
         input: prompt,
       };
@@ -1806,8 +1952,8 @@ const PRODUCT_TERM_PATTERNS = [
 ];
 
 const WORKFLOW_ATTRIBUTION_PATTERNS = [
-  /\b(?:reviewed|generated|suggested|assisted|authored|written|created|made|produced)\s+(?:by|with)\s+(?:codex|claude|gemini|chatgpt|openai|anthropic)\b/iu,
-  /\b(?:codex|claude|gemini|chatgpt|openai|anthropic)[\s-]+(?:reviewed|generated|suggested|assisted|authored|written|created|made|produced)\b/iu,
+  /\b(?:reviewed|generated|suggested|assisted|authored|written|created|made|produced)\s+(?:by|with)\s+(?:(?:an?|the)\s+)?(?:codex|claude|gemini|chatgpt|openai|anthropic|ai|llm|reviewer)\b/iu,
+  /\b(?:(?:an?|the)\s+)?(?:codex|claude|gemini|chatgpt|openai|anthropic|ai|llm|reviewer)[\s-]+(?:reviewed|generated|suggested|assisted|authored|written|created|made|produced)\b/iu,
   /\b(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance)\s+(?:from|by)\s+(?:codex|claude|gemini|chatgpt|openai|anthropic)\b/iu,
   /\b(?:found|identified|reported|flagged|raised|caught|suggested|requested|required)\s+(?:by|during|in|from|through)\s+(?:(?:the|a)\s+)?(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?(?:review|reviewer|feedback|findings?|comments?)|(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu,
   /\b(?:based\s+on|because\s+of|prompted\s+by|in\s+response\s+to)\s+(?:(?:the|a)\s+)?(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?(?:review|reviewer|feedback|findings?|comments?)|(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu,
@@ -1853,6 +1999,32 @@ function commitSection(body, name) {
     .slice(start + 1, end < 0 ? undefined : end)
     .join("\n")
     .trim();
+}
+
+function isVerbatimVerificationCommand(line) {
+  const command = line
+    .trim()
+    .replace(/^[-*]\s+/u, "")
+    .replace(/^\$\s+/u, "");
+  if (/^`[^`]+`$/u.test(command)) return true;
+  return /^(?:(?:[A-Za-z_][A-Za-z0-9_]*=\S+)\s+)*(?:(?:\.{0,2}[\\/]|[A-Za-z]:[\\/])\S+|(?:bash|bun|bundle|cargo|claude|cmake|codex|composer|deno|docker|dotnet|gh|git|go|gradle|java|make|mvn|node|npm|npx|php|pnpm|powershell|pwsh|pytest|python3?|ruby|rustc|sh|swift|xcodebuild|yarn|zsh)\b)/u.test(
+    command,
+  );
+}
+
+function longCommitProseLine(body) {
+  let section = null;
+  const lines = body.split(/\r?\n/u);
+  return lines.findIndex((line) => {
+    const heading = line.trim().match(
+      /^(Failure|Change|Rationale|Verification):\s*$/u,
+    );
+    if (heading) section = heading[1];
+    return (
+      line.length > 100 &&
+      !(section === "Verification" && isVerbatimVerificationCommand(line))
+    );
+  });
 }
 
 function inspectCommitMessageWithPolicy(subject, body, options) {
@@ -1928,9 +2100,7 @@ function inspectCommitMessageWithPolicy(subject, body, options) {
         }
       }
     }
-    const longLine = body
-      .split(/\r?\n/u)
-      .findIndex((line) => line.length > 100);
+    const longLine = longCommitProseLine(body);
     if (longLine >= 0) {
       issues.push(`body line ${longLine + 1} exceeds 100 characters`);
     }
@@ -2065,7 +2235,10 @@ function doctorCommand(env, cwd = process.cwd()) {
   });
   const root =
     topLevel.status === 0 ? path.resolve(topLevel.stdout.trim()) : requested;
-  const context = { root };
+  const context = {
+    root,
+    ...(topLevel.status === 0 ? { storage: repository(root).storage } : {}),
+  };
   const codexStatus = codexAvailability(env, context);
   const providers = availableProviders(env, context, codexStatus);
   return {

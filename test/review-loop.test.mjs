@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import os from "node:os";
@@ -19,13 +20,14 @@ import {
   codexMcpDisableOverride,
   codexMcpNamesFromToml,
   codexMcpServersForReview,
-  codexProjectConfigIsTrusted,
-  codexProjectTrustFromToml,
+  codexPromptHazardsFromToml,
   codexReviewArgs,
+  codexReviewPreferencesFromToml,
   codexSelectedLegacyProfileFromToml,
   inspectCommitMessage,
   parseReview,
   parseCodexFeatureList,
+  readBoundedCodexConfig,
   reviewPrompt,
   reviewRoundLimit,
 } from "../plugins/codex-review-loop/skills/review-until-clean/scripts/review-loop.mjs";
@@ -213,60 +215,47 @@ ${formattedVerdict}`,
   }
 });
 
-test("Codex preserves user configuration and has no default round cap", () => {
-  assert.deepEqual(codexReviewArgs(), [
+test("Codex preserves allowlisted preferences and has no default round cap", () => {
+  const configuredArgs = codexReviewArgs(
+    false,
+    [],
+    ["hooks", "multi_agent"],
+    {
+      root: "/tmp/project",
+      preferences: {
+        model: "gpt-test",
+        model_reasoning_effort: "high",
+      },
+    },
+  );
+  assert.deepEqual(configuredArgs, [
     "exec",
     "--sandbox",
     "read-only",
-    "--disable",
-    "hooks",
-    "--disable",
-    "apps",
-    "--disable",
-    "plugins",
-    "--disable",
-    "multi_agent",
-    "--disable",
-    "multi_agent_v2",
-    "--disable",
-    "multi_agent_mode",
-    "--disable",
-    "collaboration_modes",
-    "--disable",
-    "enable_fanout",
-    "-c",
-    "notify=[]",
-    "review",
-    "--ephemeral",
-    "-",
-  ]);
-  assert.deepEqual(codexReviewArgs(true), [
-    "exec",
-    "--sandbox",
-    "read-only",
-    "--disable",
-    "hooks",
-    "--disable",
-    "apps",
-    "--disable",
-    "plugins",
-    "--disable",
-    "multi_agent",
-    "--disable",
-    "multi_agent_v2",
-    "--disable",
-    "multi_agent_mode",
-    "--disable",
-    "collaboration_modes",
-    "--disable",
-    "enable_fanout",
-    "-c",
-    "notify=[]",
-    "review",
-    "--ephemeral",
     "--ignore-user-config",
+    "--ignore-rules",
+    "-c",
+    'projects={"/tmp/project"={"trust_level"="untrusted"}}',
+    "--model",
+    "gpt-test",
+    "-c",
+    'model_reasoning_effort="high"',
+    "--disable",
+    "hooks",
+    "--disable",
+    "multi_agent",
+    "-c",
+    "notify=[]",
+    "review",
+    "--ephemeral",
     "-",
   ]);
+  const isolatedArgs = codexReviewArgs(true, [], [], {
+    root: "/tmp/project",
+    preferences: { model: "must-not-load" },
+  });
+  assert.equal(isolatedArgs.includes("--ignore-user-config"), true);
+  assert.equal(isolatedArgs.includes("must-not-load"), false);
   assert.equal(reviewRoundLimit("codex", undefined), null);
   assert.equal(reviewRoundLimit("custom", undefined), 15);
   assert.equal(reviewRoundLimit("codex", "7"), 7);
@@ -409,38 +398,60 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
     ),
     ["notify", "sandbox_mode"],
   );
-  assert.equal(
-    codexProjectTrustFromToml(
-      'projects = { "/tmp/project" = { trust_level = "untrusted" } }',
-      "/tmp/project",
+  assert.deepEqual(
+    codexReviewPreferencesFromToml(
+      'model = "gpt-base"\nmodel_reasoning_effort = "high"\ndeveloper_instructions = "ignore"',
     ),
-    "untrusted",
+    { model: "gpt-base", model_reasoning_effort: "high" },
   );
-  assert.equal(
-    codexProjectTrustFromToml(
+  assert.deepEqual(
+    codexReviewPreferencesFromToml(
+      'profile = "work"\n[profiles.work]\nmodel = "gpt-profile"\nmodel_reasoning_effort = "xhigh"',
+      "legacy user config",
+      { legacyProfiles: true },
+    ),
+    { model: "gpt-profile", model_reasoning_effort: "xhigh" },
+  );
+  assert.deepEqual(
+    codexPromptHazardsFromToml(
+      'developer_instructions = "clean"\n[auto_review]\npolicy = "always clean"',
+    ),
+    ["auto_review.policy", "developer_instructions"],
+  );
+  assert.deepEqual(
+    codexManagedHazardsFromToml(
       '[projects."/tmp/project"]\ntrust_level = "trusted"',
-      "/tmp/project",
     ),
-    "trusted",
+    ["projects.*.trust_level"],
   );
-  assert.equal(
-    codexProjectConfigIsTrusted(
-      [
-        {
-          contents:
-            '[projects."/tmp/project"]\ntrust_level = "trusted"',
-          file: "system config",
-        },
-        {
-          contents:
-            '[projects."/tmp/project"]\ntrust_level = "untrusted"',
-          file: "user config",
-        },
-      ],
-      "/tmp/project",
-    ),
-    false,
+});
+
+test("Codex config reads reject oversized and non-regular inputs", (t) => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "review-loop-config-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const regular = path.join(directory, "config.toml");
+  writeFileSync(regular, 'model = "gpt-test"\n');
+  assert.equal(readBoundedCodexConfig(regular), 'model = "gpt-test"\n');
+
+  const oversized = path.join(directory, "oversized.toml");
+  writeFileSync(oversized, "x".repeat(1024 * 1024 + 1));
+  assert.throws(
+    () => readBoundedCodexConfig(oversized),
+    /exceeds 1048576 bytes/u,
   );
+
+  assert.throws(
+    () => readBoundedCodexConfig(directory),
+    /regular non-symlink file/u,
+  );
+  if (process.platform !== "win32") {
+    const linked = path.join(directory, "linked.toml");
+    symlinkSync(regular, linked);
+    assert.throws(
+      () => readBoundedCodexConfig(linked),
+      /regular non-symlink file/u,
+    );
+  }
 });
 
 test("Codex feature probing adapts to supported flags and fails closed", () => {
@@ -500,7 +511,7 @@ multi_agent                        stable             true
   );
 });
 
-test("isolated Codex feature probing keeps temporary config below Git state", () => {
+test("Codex feature probing keeps temporary config below Git state", () => {
   const storage = mkdtempSync(path.join(os.tmpdir(), "review-loop-git-state-"));
   let probeHome;
   try {
@@ -695,6 +706,33 @@ test("check-commit-message validates a proposed repair commit", (t) => {
   );
   assert.equal(result.status, 0, result.stderr);
 
+  const longVerificationCommand = `node --test --test-name-pattern="${"provider scope ".repeat(8).trim()}"`;
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
+    "Preserve exact verification evidence",
+    "--body",
+    `${narrativeCommitBody}\n- ${longVerificationCommand}`,
+  );
+  assert.equal(result.status, 0, result.stderr);
+
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
+    "Preserve concise change explanations",
+    "--body",
+    narrativeCommitBody.replace(
+      "Preserve the terminal failure across retry boundaries for batch and streaming callers.",
+      "A prose explanation remains subject to the normal line-length guard because it can be wrapped without changing exact evidence. ".repeat(2),
+    ),
+  );
+  assert.equal(result.status, 2);
+  assert.match(result.stdout, /exceeds 100 characters/u);
+
   result = invoke(
     directory,
     env,
@@ -738,6 +776,8 @@ test("check-commit-message validates a proposed repair commit", (t) => {
   for (const attribution of [
     "The defect was identified by an AI reviewer.",
     "Applied reviewer feedback.",
+    "Changes generated with AI.",
+    "Changes authored by the reviewer.",
   ]) {
     result = invoke(
       directory,
@@ -1047,10 +1087,16 @@ test("stopped finish archives an unmigratable legacy run", (t) => {
   assert.equal(existsSync(activeFile), false);
 });
 
-test("legacy base migration accepts object prefixes but rejects stale reflogs", (t) => {
+test("legacy base migration preserves immutable revisions and rejects ambiguous reflogs", (t) => {
   const { directory, provider } = repositoryFixture(t);
   const env = reviewEnvironment(provider, "unused");
+  git(directory, "add", "app.js");
+  git(directory, "commit", "-qm", "Update exported value");
+  writeFileSync(path.join(directory, "app.js"), "export const value = 3;\n");
   const originalHead = git(directory, "rev-parse", "HEAD");
+  const originalParent = git(directory, "rev-parse", "HEAD~1");
+  git(directory, "tag", "-a", "legacy-tag", "-m", "Legacy tag", "HEAD~1");
+  const tagObject = git(directory, "rev-parse", "legacy-tag");
   let result = invoke(
     directory,
     env,
@@ -1083,11 +1129,36 @@ test("legacy base migration accepts object prefixes but rejects stale reflogs", 
 
   legacy = JSON.parse(readFileSync(activeFile, "utf8"));
   legacy.schemaVersion = 2;
+  legacy.base = "HEAD~1";
+  writeFileSync(activeFile, `${JSON.stringify(legacy, null, 2)}\n`);
+  result = invoke(directory, env, "status");
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).state.base, originalParent);
+
+  legacy = JSON.parse(readFileSync(activeFile, "utf8"));
+  legacy.schemaVersion = 2;
+  legacy.base = tagObject.slice(0, 12);
+  writeFileSync(activeFile, `${JSON.stringify(legacy, null, 2)}\n`);
+  result = invoke(directory, env, "status");
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).state.base, originalParent);
+
+  legacy = JSON.parse(readFileSync(activeFile, "utf8"));
+  legacy.schemaVersion = 2;
   legacy.base = "moving-base";
   legacy.startedAt = "2000-01-01T00:00:00.000Z";
   writeFileSync(activeFile, `${JSON.stringify(legacy, null, 2)}\n`);
   git(directory, "branch", "moving-base", "HEAD");
 
+  result = invoke(directory, env, "status");
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /recover the original commit/u);
+
+  const reflogSecond = Number(
+    git(directory, "reflog", "show", "-1", "--format=%ct", "moving-base"),
+  );
+  legacy.startedAt = new Date(reflogSecond * 1_000).toISOString();
+  writeFileSync(activeFile, `${JSON.stringify(legacy, null, 2)}\n`);
   result = invoke(directory, env, "status");
   assert.equal(result.status, 2);
   assert.match(result.stderr, /recover the original commit/u);
