@@ -33,6 +33,9 @@ const CODEX_REVIEW_DISABLED_FEATURES = [
   "plugins",
   "multi_agent",
   "multi_agent_v2",
+  "multi_agent_mode",
+  "collaboration_modes",
+  "enable_fanout",
 ];
 const SKILL_SCRIPT = fileURLToPath(import.meta.url);
 
@@ -725,6 +728,28 @@ function codexConfigRecords(contents, source) {
   return { records, selectedLegacyProfile };
 }
 
+export function codexSelectedLegacyProfileFromToml(
+  contents,
+  source = "Codex config",
+) {
+  return codexConfigRecords(contents, source).selectedLegacyProfile;
+}
+
+function activeCodexRecordParts(record, options, localSelectedProfile) {
+  if (record.parts[0] !== "profiles") return record.parts;
+  const selectedProfile = Object.hasOwn(options, "selectedLegacyProfile")
+    ? options.selectedLegacyProfile
+    : localSelectedProfile;
+  if (
+    options.legacyProfiles &&
+    selectedProfile &&
+    record.parts[1] === selectedProfile
+  ) {
+    return record.parts.slice(2);
+  }
+  return null;
+}
+
 export function codexMcpNamesFromToml(
   contents,
   source = "Codex config",
@@ -736,19 +761,12 @@ export function codexMcpNamesFromToml(
     source,
   );
   for (const record of records) {
-    if (record.parts[0] === "mcp_servers") {
-      recordMcpNames(record.parts, record.value, names, source);
-      continue;
-    }
-    if (
-      options.legacyProfiles &&
-      selectedLegacyProfile &&
-      record.parts[0] === "profiles" &&
-      record.parts[1] === selectedLegacyProfile &&
-      record.parts[2] === "mcp_servers"
-    ) {
-      recordMcpNames(record.parts.slice(2), record.value, names, source);
-    }
+    const parts = activeCodexRecordParts(
+      record,
+      options,
+      selectedLegacyProfile,
+    );
+    if (parts) recordMcpNames(parts, record.value, names, source);
   }
   return [...names].sort();
 }
@@ -762,24 +780,39 @@ export function codexManagedHazardsFromToml(
     contents,
     source,
   );
-  const hasActiveNotify = records.some((record) => {
-    if (record.parts.length === 1 && record.parts[0] === "notify") {
-      return (
+  const hazards = new Set();
+  for (const record of records) {
+    const parts = activeCodexRecordParts(
+      record,
+      options,
+      selectedLegacyProfile,
+    );
+    if (!parts) continue;
+    if (parts.length === 1 && parts[0] === "notify") {
+      if (
         record.value === undefined ||
         record.value.replace(/\s/gu, "") !== "[]"
-      );
+      ) {
+        hazards.add("notify");
+      }
+    } else if (
+      parts.length === 1 &&
+      ["sandbox_mode", "default_permissions"].includes(parts[0])
+    ) {
+      const value = tomlStringValue(record.value ?? "", source);
+      if (!["read-only", ":read-only"].includes(value)) hazards.add(parts[0]);
+    } else if (
+      parts[0] === "features" &&
+      CODEX_REVIEW_DISABLED_FEATURES.includes(parts[1])
+    ) {
+      const value = record.value?.trim();
+      if (!["true", "false"].includes(value)) {
+        throw new CliError(`Cannot parse a managed feature in ${source}.`, 3);
+      }
+      if (value === "true") hazards.add(`features.${parts[1]}`);
     }
-    return (
-      options.legacyProfiles &&
-      selectedLegacyProfile &&
-      record.parts[0] === "profiles" &&
-      record.parts[1] === selectedLegacyProfile &&
-      record.parts[2] === "notify" &&
-      (record.value === undefined ||
-        record.value.replace(/\s/gu, "") !== "[]")
-    );
-  });
-  return hasActiveNotify ? ["notify"] : [];
+  }
+  return [...hazards].sort();
 }
 
 function codexHome(env) {
@@ -842,22 +875,25 @@ function codexManagedPreference(env) {
   return Buffer.from(encoded, "base64").toString("utf8");
 }
 
-function assertManagedCodexConfigSafe(contents, source, legacyProfiles) {
+function assertManagedCodexConfigSafe(
+  contents,
+  source,
+  legacyProfiles,
+  selectedLegacyProfile,
+) {
+  const options = { legacyProfiles, selectedLegacyProfile };
   if (
-    codexMcpNamesFromToml(contents, source, { legacyProfiles }).length > 0
+    codexMcpNamesFromToml(contents, source, options).length > 0
   ) {
     throw new CliError(
       `Cannot safely override MCP servers from ${source}.`,
       3,
     );
   }
-  if (
-    codexManagedHazardsFromToml(contents, source, { legacyProfiles }).includes(
-      "notify",
-    )
-  ) {
+  const hazards = codexManagedHazardsFromToml(contents, source, options);
+  if (hazards.length > 0) {
     throw new CliError(
-      `Cannot safely clear notification commands from ${source}.`,
+      `Cannot safely override managed Codex settings from ${source}: ${hazards.join(", ")}.`,
       3,
     );
   }
@@ -882,7 +918,7 @@ function configuredCodexMcpServers(state, env) {
       : [path.join(codexHome(env), "config.toml")]),
     path.join(state.root, ".codex", "config.toml"),
   ].filter(Boolean);
-  const names = new Set();
+  const ordinaryConfigs = [];
   for (const file of ordinary) {
     if (!existsSync(file)) continue;
     let contents;
@@ -894,25 +930,52 @@ function configuredCodexMcpServers(state, env) {
         3,
       );
     }
-    for (const name of codexMcpNamesFromToml(contents, file, { legacyProfiles })) {
-      names.add(name);
-    }
+    ordinaryConfigs.push({ contents, file });
   }
 
+  const managedConfigs = [];
   for (const managedFile of codexManagedConfigPaths(env)) {
     if (!existsSync(managedFile)) continue;
-    assertManagedCodexConfigSafe(
-      readFileSync(managedFile, "utf8"),
-      managedFile,
-      legacyProfiles,
-    );
+    managedConfigs.push({
+      contents: readFileSync(managedFile, "utf8"),
+      file: managedFile,
+    });
   }
   const managedPreference = codexManagedPreference(env);
   if (managedPreference) {
+    managedConfigs.push({
+      contents: managedPreference,
+      file: "managed Codex preferences",
+    });
+  }
+
+  let selectedLegacyProfile = null;
+  if (legacyProfiles) {
+    for (const config of [...ordinaryConfigs, ...managedConfigs]) {
+      const selected = codexSelectedLegacyProfileFromToml(
+        config.contents,
+        config.file,
+      );
+      if (selected !== null) selectedLegacyProfile = selected;
+    }
+  }
+  const options = { legacyProfiles, selectedLegacyProfile };
+  const names = new Set();
+  for (const config of ordinaryConfigs) {
+    for (const name of codexMcpNamesFromToml(
+      config.contents,
+      config.file,
+      options,
+    )) {
+      names.add(name);
+    }
+  }
+  for (const config of managedConfigs) {
     assertManagedCodexConfigSafe(
-      managedPreference,
-      "managed Codex preferences",
+      config.contents,
+      config.file,
       legacyProfiles,
+      selectedLegacyProfile,
     );
   }
   // Cloud bundles contain requirements, whose MCP table restricts configured
@@ -1820,11 +1883,14 @@ function finishCommand(repo, options) {
   };
 }
 
-function doctorCommand(env) {
-  const codexStatus = codexAvailability(env);
-  const providers = availableProviders(env, undefined, codexStatus);
+function doctorCommand(env, cwd = process.cwd()) {
+  const root = path.resolve(cwd);
+  const context = { root };
+  const codexStatus = codexAvailability(env, context);
+  const providers = availableProviders(env, context, codexStatus);
   return {
     status: Object.values(providers).some(Boolean) ? "ready" : "unavailable",
+    cwd: root,
     node: process.version,
     platform: `${process.platform}/${process.arch}`,
     providers,
@@ -1894,7 +1960,7 @@ export async function main(argv, runtime = {}) {
 
     let result;
     if (command === "doctor") {
-      result = doctorCommand(env);
+      result = doctorCommand(env, options.cwd ?? process.cwd());
     } else if (command === "check-commit-message") {
       result = checkCommitMessageCommand(options);
     } else {

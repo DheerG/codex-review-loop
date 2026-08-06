@@ -20,6 +20,7 @@ import {
   codexMcpNamesFromToml,
   codexMcpServersForReview,
   codexReviewArgs,
+  codexSelectedLegacyProfileFromToml,
   inspectCommitMessage,
   parseReview,
   parseCodexFeatureList,
@@ -225,6 +226,12 @@ test("Codex preserves user configuration and has no default round cap", () => {
     "multi_agent",
     "--disable",
     "multi_agent_v2",
+    "--disable",
+    "multi_agent_mode",
+    "--disable",
+    "collaboration_modes",
+    "--disable",
+    "enable_fanout",
     "-c",
     "notify=[]",
     "review",
@@ -245,6 +252,12 @@ test("Codex preserves user configuration and has no default round cap", () => {
     "multi_agent",
     "--disable",
     "multi_agent_v2",
+    "--disable",
+    "multi_agent_mode",
+    "--disable",
+    "collaboration_modes",
+    "--disable",
+    "enable_fanout",
     "-c",
     "notify=[]",
     "review",
@@ -344,6 +357,40 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
   );
   assert.deepEqual(codexManagedHazardsFromToml("notify = []"), []);
   assert.deepEqual(codexManagedHazardsFromToml("notify = [\n]"), []);
+  assert.deepEqual(
+    codexManagedHazardsFromToml('sandbox_mode = "workspace-write"'),
+    ["sandbox_mode"],
+  );
+  assert.deepEqual(
+    codexManagedHazardsFromToml('sandbox_mode = "read-only"'),
+    [],
+  );
+  assert.deepEqual(
+    codexManagedHazardsFromToml(
+      "[features]\nmulti_agent_mode = true",
+    ),
+    ["features.multi_agent_mode"],
+  );
+
+  const selectedLegacyProfile = codexSelectedLegacyProfileFromToml(
+    'profile = "work"',
+  );
+  assert.deepEqual(
+    codexMcpNamesFromToml(
+      '[profiles.work.mcp_servers.writer]\ncommand = "writer"',
+      "system config",
+      { legacyProfiles: true, selectedLegacyProfile },
+    ),
+    ["writer"],
+  );
+  assert.deepEqual(
+    codexManagedHazardsFromToml(
+      '[profiles.work]\nnotify = ["dangerous-command"]',
+      "managed config",
+      { legacyProfiles: true, selectedLegacyProfile },
+    ),
+    ["notify"],
+  );
 });
 
 test("Codex feature probing adapts to supported flags and fails closed", () => {
@@ -363,14 +410,26 @@ multi_agent                        stable             true
     (_root, _env, requested = []) => {
       calls.push(requested);
       return new Map(
-        ["hooks", "apps", "multi_agent"].map((feature) => [
+        [
+          "hooks",
+          "apps",
+          "multi_agent_mode",
+          "collaboration_modes",
+          "enable_fanout",
+        ].map((feature) => [
           feature,
           !requested.includes(feature),
         ]),
       );
     },
   );
-  assert.deepEqual(disabled, ["hooks", "apps", "multi_agent"]);
+  assert.deepEqual(disabled, [
+    "hooks",
+    "apps",
+    "multi_agent_mode",
+    "collaboration_modes",
+    "enable_fanout",
+  ]);
   assert.deepEqual(calls, [[], disabled]);
   assert.doesNotMatch(codexReviewArgs(false, [], disabled).join(" "), /multi_agent_v2/u);
 
@@ -417,16 +476,17 @@ test("isolated Codex feature probing keeps temporary config below Git state", ()
   }
 });
 
-test("doctor reports Codex availability from the safety preflight", () => {
-  const result = execute(process.execPath, [cli, "doctor", "--json"], root, {
-    ...process.env,
-    CODEX_REVIEW_LOOP_PROVIDER_COMMAND_JSON: JSON.stringify([
-      process.execPath,
-      "--version",
-    ]),
-  });
+test("doctor reports Codex availability from the target safety preflight", (t) => {
+  const { directory, provider } = repositoryFixture(t);
+  const result = execute(
+    process.execPath,
+    [cli, "doctor", "--cwd", directory, "--json"],
+    root,
+    reviewEnvironment(provider, "unused"),
+  );
   assert.equal(result.status, 0, result.stderr);
   const report = JSON.parse(result.stdout);
+  assert.equal(report.cwd, directory);
   assert.equal(typeof report.providers.codex, "boolean");
   assert.equal(typeof report.providerDiagnostics.codex, "string");
   assert.equal(
