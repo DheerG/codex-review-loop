@@ -213,6 +213,10 @@ ${formattedVerdict}`,
       "invalid",
     );
   }
+  assert.equal(
+    parseReview("~~No actionable defects found.~~", "codex").status,
+    "invalid",
+  );
 });
 
 test("Codex preserves allowlisted preferences and has no default round cap", () => {
@@ -423,6 +427,19 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
       '[projects."/tmp/project"]\ntrust_level = "trusted"',
     ),
     ["projects.*.trust_level"],
+  );
+  assert.deepEqual(
+    codexManagedHazardsFromToml(
+      "[projects.'/tmp/project']\ntrust_level = '''trusted'''",
+    ),
+    ["projects.*.trust_level"],
+  );
+  assert.throws(
+    () =>
+      codexManagedHazardsFromToml(
+        "[projects.'/tmp/project']\ntrust_level = '''",
+      ),
+    /Cannot safely parse a multiline TOML string/u,
   );
 });
 
@@ -706,7 +723,7 @@ test("check-commit-message validates a proposed repair commit", (t) => {
   );
   assert.equal(result.status, 0, result.stderr);
 
-  const longVerificationCommand = `node --test --test-name-pattern="${"provider scope ".repeat(8).trim()}"`;
+  const longVerificationCommand = `uv run pytest --expression "${"provider scope ".repeat(8).trim()}"`;
   result = invoke(
     directory,
     env,

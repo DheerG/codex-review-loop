@@ -835,6 +835,26 @@ function recordMcpNames(parts, value, names, source) {
 
 function tomlStringValue(value, source) {
   const trimmed = value.trim();
+  const delimiter = ['"""', "'''"].find((item) => trimmed.startsWith(item));
+  if (delimiter) {
+    if (trimmed.length < 6 || !trimmed.endsWith(delimiter)) {
+      throw new CliError(
+        `Cannot safely parse a multiline TOML string in ${source}.`,
+        3,
+      );
+    }
+    let raw = trimmed.slice(3, -3).replace(/^\r?\n/u, "");
+    if (delimiter === '"""') {
+      if (/\\\r?\n/u.test(raw)) {
+        throw new CliError(
+          `Cannot safely parse a multiline TOML string in ${source}.`,
+          3,
+        );
+      }
+      raw = decodeTomlBasicKey(raw, source);
+    }
+    return raw;
+  }
   if (
     trimmed.length < 2 ||
     !['"', "'"].includes(trimmed[0]) ||
@@ -1561,7 +1581,7 @@ function normalizeCodexCleanLine(line) {
   return line
     .trim()
     .replace(/^(?:[-*>#]\s*)+/u, "")
-    .replace(/[*_`~]/gu, "")
+    .replace(/[*_`]/gu, "")
     .replace(
       /^(?:(?:overall\s+)?(?:review\s+)?(?:summary|verdict|result|assessment|conclusion|status))\s*(?::|—|-)\s*/iu,
       "",
@@ -2002,13 +2022,11 @@ function commitSection(body, name) {
 }
 
 function isVerbatimVerificationCommand(line) {
-  const command = line
-    .trim()
-    .replace(/^[-*]\s+/u, "")
-    .replace(/^\$\s+/u, "");
-  if (/^`[^`]+`$/u.test(command)) return true;
-  return /^(?:(?:[A-Za-z_][A-Za-z0-9_]*=\S+)\s+)*(?:(?:\.{0,2}[\\/]|[A-Za-z]:[\\/])\S+|(?:bash|bun|bundle|cargo|claude|cmake|codex|composer|deno|docker|dotnet|gh|git|go|gradle|java|make|mvn|node|npm|npx|php|pnpm|powershell|pwsh|pytest|python3?|ruby|rustc|sh|swift|xcodebuild|yarn|zsh)\b)/u.test(
-    command,
+  const trimmed = line.trim();
+  return (
+    /^[-*]\s+\S/u.test(trimmed) ||
+    /^\$\s+\S/u.test(trimmed) ||
+    /^`[^`]+`$/u.test(trimmed)
   );
 }
 
