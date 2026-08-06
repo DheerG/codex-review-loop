@@ -14,6 +14,7 @@ import test from "node:test";
 
 import {
   codexFeaturesForReview,
+  codexManagedHazardsFromToml,
   codexManagedConfigPath,
   codexMcpDisableOverride,
   codexMcpNamesFromToml,
@@ -224,6 +225,8 @@ test("Codex preserves user configuration and has no default round cap", () => {
     "multi_agent",
     "--disable",
     "multi_agent_v2",
+    "-c",
+    "notify=[]",
     "review",
     "--ephemeral",
     "-",
@@ -242,6 +245,8 @@ test("Codex preserves user configuration and has no default round cap", () => {
     "multi_agent",
     "--disable",
     "multi_agent_v2",
+    "-c",
+    "notify=[]",
     "review",
     "--ephemeral",
     "--ignore-user-config",
@@ -262,7 +267,7 @@ test("Codex preserves user configuration and has no default round cap", () => {
     /SECRET|sensitive-value|docs\.example\.test|command|url/u,
   );
   const args = codexReviewArgs(false, mcpServers);
-  const overrideIndex = args.indexOf("-c");
+  const overrideIndex = args.indexOf(mcpOverride) - 1;
   assert.deepEqual(args.slice(overrideIndex, overrideIndex + 2), [
     "-c",
     mcpOverride,
@@ -315,6 +320,13 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
     ),
     ["inline server", "local"],
   );
+  assert.deepEqual(
+    codexMcpNamesFromToml(`mcp_servers = {
+      "multiline server" = { url = "https://example.test" },
+      local = { command = "node" },
+    }`),
+    ["local", "multiline server"],
+  );
   assert.throws(
     () => codexMcpNamesFromToml('mcp_servers = "unknown"'),
     /Cannot safely inventory inline mcp_servers/u,
@@ -326,6 +338,12 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
     ),
     "C:\\ProgramData\\OpenAI\\Codex\\managed_config.toml",
   );
+  assert.deepEqual(
+    codexManagedHazardsFromToml('notify = ["dangerous-command"]'),
+    ["notify"],
+  );
+  assert.deepEqual(codexManagedHazardsFromToml("notify = []"), []);
+  assert.deepEqual(codexManagedHazardsFromToml("notify = [\n]"), []);
 });
 
 test("Codex feature probing adapts to supported flags and fails closed", () => {

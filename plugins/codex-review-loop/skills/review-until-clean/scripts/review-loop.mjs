@@ -646,17 +646,36 @@ function tomlStringValue(value, source) {
   return trimmed[0] === '"' ? decodeTomlBasicKey(raw, source) : raw;
 }
 
-export function codexMcpNamesFromToml(
-  contents,
-  source = "Codex config",
-  options = {},
-) {
-  const names = new Set();
+function tomlContainerBalance(value) {
+  let balance = 0;
+  let quote = null;
+  let escaped = false;
+  for (const character of value) {
+    if (quote === '"') {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === quote) quote = null;
+      continue;
+    }
+    if (quote === "'") {
+      if (character === quote) quote = null;
+      continue;
+    }
+    if (character === '"' || character === "'") quote = character;
+    else if (character === "{" || character === "[") balance += 1;
+    else if (character === "}" || character === "]") balance -= 1;
+  }
+  return balance;
+}
+
+function codexConfigRecords(contents, source) {
   const records = [];
+  const lines = contents.split(/\r?\n/u);
   let table = [];
   let multiline = null;
   let selectedLegacyProfile = null;
-  for (const rawLine of contents.split(/\r?\n/u)) {
+  for (let lineNumber = 0; lineNumber < lines.length; lineNumber += 1) {
+    const rawLine = lines[lineNumber];
     if (multiline) {
       if (rawLine.includes(multiline)) multiline = null;
       continue;
@@ -680,7 +699,21 @@ export function codexMcpNamesFromToml(
     const equals = tomlAssignmentIndex(line);
     if (equals < 0) continue;
     const key = parseTomlKeyPath(line.slice(0, equals).trim(), source);
-    const value = line.slice(equals + 1).trim();
+    let value = line.slice(equals + 1).trim();
+    if (value.startsWith("{") || value.startsWith("[")) {
+      let balance = tomlContainerBalance(value);
+      while (balance > 0 && lineNumber + 1 < lines.length) {
+        lineNumber += 1;
+        value += `\n${stripTomlComment(lines[lineNumber]).trim()}`;
+        balance = tomlContainerBalance(value);
+      }
+      if (balance !== 0) {
+        throw new CliError(
+          `Cannot parse a multiline inline TOML value in ${source}.`,
+          3,
+        );
+      }
+    }
     const parts = [...table, ...key];
     records.push({ parts, value });
     if (parts.length === 1 && parts[0] === "profile") {
@@ -693,6 +726,19 @@ export function codexMcpNamesFromToml(
       }
     }
   }
+  return { records, selectedLegacyProfile };
+}
+
+export function codexMcpNamesFromToml(
+  contents,
+  source = "Codex config",
+  options = {},
+) {
+  const names = new Set();
+  const { records, selectedLegacyProfile } = codexConfigRecords(
+    contents,
+    source,
+  );
   for (const record of records) {
     if (record.parts[0] === "mcp_servers") {
       recordMcpNames(record.parts, record.value, names, source);
@@ -709,6 +755,35 @@ export function codexMcpNamesFromToml(
     }
   }
   return [...names].sort();
+}
+
+export function codexManagedHazardsFromToml(
+  contents,
+  source = "managed Codex config",
+  options = {},
+) {
+  const { records, selectedLegacyProfile } = codexConfigRecords(
+    contents,
+    source,
+  );
+  const hasActiveNotify = records.some((record) => {
+    if (record.parts.length === 1 && record.parts[0] === "notify") {
+      return (
+        record.value === undefined ||
+        record.value.replace(/\s/gu, "") !== "[]"
+      );
+    }
+    return (
+      options.legacyProfiles &&
+      selectedLegacyProfile &&
+      record.parts[0] === "profiles" &&
+      record.parts[1] === selectedLegacyProfile &&
+      record.parts[2] === "notify" &&
+      (record.value === undefined ||
+        record.value.replace(/\s/gu, "") !== "[]")
+    );
+  });
+  return hasActiveNotify ? ["notify"] : [];
 }
 
 function codexHome(env) {
@@ -741,6 +816,15 @@ export function codexManagedConfigPath(
   );
 }
 
+function codexManagedConfigPaths(env) {
+  const machineConfig = codexManagedConfigPath(env);
+  if (process.platform !== "win32") return [machineConfig];
+  return [
+    machineConfig,
+    path.join(codexHome(env), "managed_config.toml"),
+  ];
+}
+
 function codexManagedPreference(env) {
   if (process.platform !== "darwin") return null;
   const result = run(
@@ -751,7 +835,7 @@ function codexManagedPreference(env) {
   if (result.status !== 0) {
     if (/does not exist|domain .* not found/iu.test(result.stderr)) return null;
     throw new CliError(
-      "Cannot safely inspect managed Codex preferences for MCP servers.",
+      "Cannot safely inspect managed Codex tool preferences.",
       3,
     );
   }
@@ -760,6 +844,27 @@ function codexManagedPreference(env) {
     throw new CliError("Managed Codex preferences contain invalid base64.", 3);
   }
   return Buffer.from(encoded, "base64").toString("utf8");
+}
+
+function assertManagedCodexConfigSafe(contents, source, legacyProfiles) {
+  if (
+    codexMcpNamesFromToml(contents, source, { legacyProfiles }).length > 0
+  ) {
+    throw new CliError(
+      `Cannot safely override MCP servers from ${source}.`,
+      3,
+    );
+  }
+  if (
+    codexManagedHazardsFromToml(contents, source, { legacyProfiles }).includes(
+      "notify",
+    )
+  ) {
+    throw new CliError(
+      `Cannot safely clear notification commands from ${source}.`,
+      3,
+    );
+  }
 }
 
 function configuredCodexMcpServers(state, env) {
@@ -798,32 +903,24 @@ function configuredCodexMcpServers(state, env) {
     }
   }
 
-  const managedFile = codexManagedConfigPath(env);
-  if (existsSync(managedFile)) {
-    const managedNames = codexMcpNamesFromToml(
+  for (const managedFile of codexManagedConfigPaths(env)) {
+    if (!existsSync(managedFile)) continue;
+    assertManagedCodexConfigSafe(
       readFileSync(managedFile, "utf8"),
       managedFile,
-      { legacyProfiles },
+      legacyProfiles,
     );
-    if (managedNames.length > 0) {
-      throw new CliError(
-        "Cannot safely override MCP servers from managed Codex configuration.",
-        3,
-      );
-    }
   }
   const managedPreference = codexManagedPreference(env);
-  if (
-    managedPreference &&
-    codexMcpNamesFromToml(managedPreference, "managed Codex preferences", {
+  if (managedPreference) {
+    assertManagedCodexConfigSafe(
+      managedPreference,
+      "managed Codex preferences",
       legacyProfiles,
-    }).length > 0
-  ) {
-    throw new CliError(
-      "Cannot safely override MCP servers from managed Codex preferences.",
-      3,
     );
   }
+  // Cloud bundles contain requirements, whose MCP table restricts configured
+  // identities; they do not add server transports to the effective config.
   return [...names].sort();
 }
 
@@ -915,6 +1012,8 @@ export function codexReviewArgs(
   const args = ["exec", "--sandbox", "read-only"];
   for (const feature of disabledFeatures) args.push("--disable", feature);
   args.push(
+    "-c",
+    "notify=[]",
     ...(mcpOverride ? ["-c", mcpOverride] : []),
     "review",
     "--ephemeral",
