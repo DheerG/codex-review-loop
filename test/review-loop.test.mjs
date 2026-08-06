@@ -1241,6 +1241,7 @@ test("legacy base migration preserves immutable revisions and rejects ambiguous 
   writeFileSync(path.join(directory, "app.js"), "export const value = 3;\n");
   const originalHead = git(directory, "rev-parse", "HEAD");
   const originalParent = git(directory, "rev-parse", "HEAD~1");
+  const originalBranch = git(directory, "symbolic-ref", "--short", "HEAD");
   git(directory, "tag", "-a", "legacy-tag", "-m", "Legacy tag", "HEAD~1");
   const tagObject = git(directory, "rev-parse", "legacy-tag");
   let result = invoke(
@@ -1280,6 +1281,19 @@ test("legacy base migration preserves immutable revisions and rejects ambiguous 
   result = invoke(directory, env, "status");
   assert.equal(result.status, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).state.base, originalParent);
+
+  legacy = JSON.parse(readFileSync(activeFile, "utf8"));
+  legacy.schemaVersion = 2;
+  legacy.base = "stable-base";
+  legacy.startedAt = "2000-01-01T00:00:00.000Z";
+  writeFileSync(activeFile, `${JSON.stringify(legacy, null, 2)}\n`);
+  git(directory, "branch", "stable-base", originalParent);
+  writeFileSync(path.join(directory, "app.js"), "export const value = 2;\n");
+  git(directory, "checkout", "-q", "stable-base");
+  result = invoke(directory, env, "status");
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /recover the original commit/u);
+  git(directory, "checkout", "-q", originalBranch);
 
   legacy = JSON.parse(readFileSync(activeFile, "utf8"));
   legacy.schemaVersion = 2;

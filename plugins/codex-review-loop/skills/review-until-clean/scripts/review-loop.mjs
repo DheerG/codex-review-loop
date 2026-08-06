@@ -356,17 +356,6 @@ function pinPersistedBase(root, state) {
     if (historical.status === 0) return historical.stdout.trim();
   }
 
-  const currentBranch = git(root, ["symbolic-ref", "--quiet", "HEAD"], {
-    allowFailure: true,
-  });
-  const fullBranch = currentBranch.stdout.trim();
-  if (
-    currentBranch.status === 0 &&
-    [fullBranch, fullBranch.replace(/^refs\/heads\//u, "")].includes(base) &&
-    refExists(root, state.initialHead)
-  ) {
-    return resolveBase(root, state.initialHead);
-  }
   throw new CliError(
     `Cannot safely recover the original commit for persisted comparison base ${base}. Finish this run explicitly and start a new one.`,
     2,
