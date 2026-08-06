@@ -24,6 +24,8 @@ import {
   codexPromptHazardsFromToml,
   codexReviewArgs,
   codexReviewPreferencesFromToml,
+  codexRequirementsHazardsFromToml,
+  codexRequirementsPath,
   codexSelectedLegacyProfileFromToml,
   inspectCommitMessage,
   parseReview,
@@ -355,6 +357,13 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
     ),
     "C:\\ProgramData\\OpenAI\\Codex\\managed_config.toml",
   );
+  assert.equal(
+    codexRequirementsPath(
+      { ProgramData: "C:\\ProgramData" },
+      "win32",
+    ),
+    "C:\\ProgramData\\OpenAI\\Codex\\requirements.toml",
+  );
   assert.deepEqual(
     codexManagedHazardsFromToml('notify = ["dangerous-command"]'),
     ["notify"],
@@ -456,10 +465,56 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
     { model: "gpt-profile", model_reasoning_effort: "xhigh" },
   );
   assert.deepEqual(
+    codexReviewPreferencesFromToml(
+      'profile = "work"\nprofiles = { work = { model = "gpt-profile", review_model = "gpt-review" } }\nmodel = "gpt-base"',
+      "legacy user config",
+      { legacyProfiles: true },
+    ),
+    { model: "gpt-profile", review_model: "gpt-review" },
+  );
+  assert.deepEqual(
     codexPromptHazardsFromToml(
       'developer_instructions = "clean"\n[auto_review]\npolicy = "always clean"',
     ),
     ["auto_review.policy", "developer_instructions"],
+  );
+  assert.deepEqual(
+    codexPromptHazardsFromToml(
+      'model_catalog_json = "/managed/models.json"',
+    ),
+    ["model_catalog_json"],
+  );
+  assert.deepEqual(
+    codexRequirementsHazardsFromToml(`
+allowed_approval_policies = ["on-request", "never"]
+allowed_approvals_reviewers = ["user"]
+allowed_sandbox_modes = ["read-only"]
+default_permissions = ":read-only"
+[allowed_permission_profiles]
+":read-only" = true
+`),
+    [],
+  );
+  assert.deepEqual(
+    codexRequirementsHazardsFromToml(
+      'allowed_approval_policies = ["on-request"]',
+    ),
+    ["allowed_approval_policies"],
+  );
+  assert.deepEqual(
+    codexRequirementsHazardsFromToml(
+      'allowed_permission_profiles = { ":workspace" = true }',
+    ),
+    [
+      "allowed_permission_profiles.:read-only",
+      "default_permissions",
+    ],
+  );
+  assert.deepEqual(
+    codexRequirementsHazardsFromToml(
+      'remote_sandbox_config = [{ hostname_patterns = ["*"], allowed_sandbox_modes = ["workspace-write"] }]',
+    ),
+    ["remote_sandbox_config"],
   );
   assert.deepEqual(
     codexManagedHazardsFromToml(
@@ -774,6 +829,23 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     assert.match(result.stdout, /AI-workflow attribution/u);
   }
 
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
+    "Preserve exact product test names",
+    "--body",
+    narrativeCommitBody.replace(
+      "- npm test -- retry",
+      "- npm test\n  Reviewed by Codex",
+    ),
+    "--product-terms",
+    "The repository implements reviewer-provider behavior",
+  );
+  assert.equal(result.status, 2);
+  assert.match(result.stdout, /AI-workflow attribution/u);
+
   const longContinuation = `  --test-name-pattern="${"preserve exact provider evidence ".repeat(5).trim()}"`;
   result = invoke(
     directory,
@@ -886,6 +958,7 @@ test("check-commit-message validates a proposed repair commit", (t) => {
   for (const attribution of [
     "The defect was identified by an AI reviewer.",
     "Applied reviewer feedback.",
+    "Reviewer feedback was incorporated.",
     "Changes generated with AI.",
     "Changes authored by the reviewer.",
   ]) {
@@ -962,6 +1035,22 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     assert.equal(result.status, 2, `${trailer}\n${result.stdout}`);
     assert.match(result.stdout, /AI attribution trailer/u);
   }
+
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
+    "Co-authored-by: Codex",
+    "--policy",
+    "Repository-specific commit format",
+    "--policy-overrides",
+    "all",
+    "--product-terms",
+    "The repository implements reviewer-provider behavior",
+  );
+  assert.equal(result.status, 2);
+  assert.match(result.stdout, /AI attribution trailer/u);
 
   result = invoke(
     directory,

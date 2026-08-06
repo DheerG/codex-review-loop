@@ -868,6 +868,41 @@ function tomlStringValue(value, source) {
   return trimmed[0] === '"' ? decodeTomlBasicKey(raw, source) : raw;
 }
 
+function tomlStringArrayValue(value, source) {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) {
+    throw new CliError(`Cannot parse a TOML string array in ${source}.`, 3);
+  }
+  const entries = [];
+  let start = 1;
+  let quote = null;
+  let escaped = false;
+  for (let index = 1; index < trimmed.length - 1; index += 1) {
+    const character = trimmed[index];
+    if (quote === '"') {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === quote) quote = null;
+    } else if (quote === "'") {
+      if (character === quote) quote = null;
+    } else if (character === '"' || character === "'") {
+      quote = character;
+    } else if (character === ",") {
+      entries.push(trimmed.slice(start, index).trim());
+      start = index + 1;
+    }
+  }
+  if (quote) {
+    throw new CliError(`Cannot parse a TOML string array in ${source}.`, 3);
+  }
+  entries.push(trimmed.slice(start, -1).trim());
+  if (entries.at(-1) === "") entries.pop();
+  if (entries.some((entry) => !entry)) {
+    throw new CliError(`Cannot parse a TOML string array in ${source}.`, 3);
+  }
+  return entries.map((entry) => tomlStringValue(entry, source));
+}
+
 function tomlContainerBalance(value) {
   let balance = 0;
   let quote = null;
@@ -984,17 +1019,23 @@ export function codexReviewPreferencesFromToml(
     source,
   );
   const preferences = {};
-  for (const record of records) {
-    const parts = activeCodexRecordParts(
-      record,
-      options,
-      selectedLegacyProfile,
-    );
-    if (
-      parts?.length === 1 &&
-      ["model", "review_model", "model_reasoning_effort"].includes(parts[0])
-    ) {
-      preferences[parts[0]] = tomlStringValue(record.value ?? "", source);
+  const orderedRecords = [
+    records.filter((record) => record.parts[0] !== "profiles"),
+    records.filter((record) => record.parts[0] === "profiles"),
+  ];
+  for (const group of orderedRecords) {
+    for (const record of group) {
+      const parts = activeCodexRecordParts(
+        record,
+        options,
+        selectedLegacyProfile,
+      );
+      if (
+        parts?.length === 1 &&
+        ["model", "review_model", "model_reasoning_effort"].includes(parts[0])
+      ) {
+        preferences[parts[0]] = tomlStringValue(record.value ?? "", source);
+      }
     }
   }
   return preferences;
@@ -1016,6 +1057,7 @@ export function codexPromptHazardsFromToml(
     "experimental_compact_prompt_file",
     "experimental_instructions_file",
     "instructions",
+    "model_catalog_json",
     "model_instructions_file",
   ]);
   for (const record of records) {
@@ -1143,6 +1185,74 @@ export function codexApprovalHazardsFromToml(
   return [...hazards].sort();
 }
 
+export function codexRequirementsHazardsFromToml(
+  contents,
+  source = "Codex requirements",
+) {
+  const { records } = codexConfigRecords(contents, source);
+  const hazards = new Set(
+    codexPromptHazardsFromToml(contents, source),
+  );
+  let allowedProfilesPresent = false;
+  let readOnlyProfileAllowed = false;
+  let defaultPermissions;
+  for (const record of records) {
+    const [key, child] = record.parts;
+    if (record.parts.length === 1 && key === "allowed_approval_policies") {
+      if (!tomlStringArrayValue(record.value ?? "", source).includes("never")) {
+        hazards.add(key);
+      }
+    } else if (
+      record.parts.length === 1 &&
+      key === "allowed_approvals_reviewers"
+    ) {
+      if (!tomlStringArrayValue(record.value ?? "", source).includes("user")) {
+        hazards.add(key);
+      }
+    } else if (
+      record.parts.length === 1 &&
+      key === "allowed_sandbox_modes"
+    ) {
+      if (!tomlStringArrayValue(record.value ?? "", source).includes("read-only")) {
+        hazards.add(key);
+      }
+    } else if (record.parts.length === 1 && key === "default_permissions") {
+      defaultPermissions = tomlStringValue(record.value ?? "", source);
+      if (defaultPermissions !== ":read-only") hazards.add(key);
+    } else if (key === "allowed_permission_profiles") {
+      allowedProfilesPresent = true;
+      if (child === ":read-only") {
+        const value = record.value?.trim();
+        if (!["true", "false"].includes(value)) {
+          throw new CliError(
+            `Cannot parse allowed permission profiles in ${source}.`,
+            3,
+          );
+        }
+        readOnlyProfileAllowed = value === "true";
+      }
+    } else if (key === "remote_sandbox_config") {
+      hazards.add("remote_sandbox_config");
+    } else if (
+      key === "features" &&
+      CODEX_REVIEW_DISABLED_FEATURES.includes(child)
+    ) {
+      const value = record.value?.trim();
+      if (!["true", "false"].includes(value)) {
+        throw new CliError(`Cannot parse a required feature in ${source}.`, 3);
+      }
+      if (value === "true") hazards.add(`features.${child}`);
+    }
+  }
+  if (allowedProfilesPresent) {
+    if (defaultPermissions !== ":read-only") hazards.add("default_permissions");
+    if (!readOnlyProfileAllowed) {
+      hazards.add("allowed_permission_profiles.:read-only");
+    }
+  }
+  return [...hazards].sort();
+}
+
 function codexHome(env) {
   return path.resolve(env.CODEX_HOME ?? path.join(os.homedir(), ".codex"));
 }
@@ -1173,6 +1283,23 @@ export function codexManagedConfigPath(
   );
 }
 
+export function codexRequirementsPath(
+  env,
+  platform = process.platform,
+) {
+  if (platform !== "win32") return "/etc/codex/requirements.toml";
+  const programData = env.ProgramData ?? env.PROGRAMDATA;
+  if (!programData) {
+    throw new CliError("Cannot locate Windows Codex requirements.", 3);
+  }
+  return path.win32.join(
+    programData,
+    "OpenAI",
+    "Codex",
+    "requirements.toml",
+  );
+}
+
 function codexManagedConfigPaths(env) {
   const machineConfig = codexManagedConfigPath(env);
   if (process.platform !== "win32") return [machineConfig];
@@ -1182,32 +1309,50 @@ function codexManagedConfigPaths(env) {
   ];
 }
 
-function codexManagedPreference(env) {
+function codexManagedPreference(
+  env,
+  key = "config_toml_base64",
+  label = "config",
+) {
   if (process.platform !== "darwin") return null;
   const result = run(
     "/usr/bin/defaults",
-    ["read", "com.openai.codex", "config_toml_base64"],
+    ["read", "com.openai.codex", key],
     { env, allowFailure: true },
   );
   if (result.status !== 0) {
     if (/does not exist|domain .* not found/iu.test(result.stderr)) return null;
     throw new CliError(
-      "Cannot safely inspect managed Codex tool preferences.",
+      `Cannot safely inspect managed Codex ${label} preferences.`,
       3,
     );
   }
-  const encoded = result.stdout.trim().replace(/^"|"$/gu, "").replace(/\s/gu, "");
+  const encoded = result.stdout
+    .trim()
+    .replace(/^"|"$/gu, "")
+    .replace(/\s/gu, "");
   if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(encoded)) {
-    throw new CliError("Managed Codex preferences contain invalid base64.", 3);
+    throw new CliError(
+      `Managed Codex ${label} preferences contain invalid base64.`,
+      3,
+    );
   }
   const decoded = Buffer.from(encoded, "base64");
   if (decoded.length > MAX_CODEX_CONFIG_BYTES) {
     throw new CliError(
-      `Managed Codex preferences exceed ${MAX_CODEX_CONFIG_BYTES} bytes.`,
+      `Managed Codex ${label} preferences exceed ${MAX_CODEX_CONFIG_BYTES} bytes.`,
       3,
     );
   }
   return decoded.toString("utf8");
+}
+
+function codexManagedRequirementsPreference(env) {
+  return codexManagedPreference(
+    env,
+    "requirements_toml_base64",
+    "requirements",
+  );
 }
 
 function assertManagedCodexConfigSafe(
@@ -1234,6 +1379,16 @@ function assertManagedCodexConfigSafe(
   }
 }
 
+function assertCodexRequirementsSafe(contents, source) {
+  const hazards = codexRequirementsHazardsFromToml(contents, source);
+  if (hazards.length > 0) {
+    throw new CliError(
+      `Codex requirements in ${source} conflict with safe review isolation: ${hazards.join(", ")}.`,
+      3,
+    );
+  }
+}
+
 function codexUsesLegacyProfiles(state, env) {
   const version = run("codex", ["--version"], {
     cwd: state.root,
@@ -1254,6 +1409,19 @@ function codexConfigFile(file) {
 
 function configuredCodexMcpServers(state, env) {
   const legacyProfiles = codexUsesLegacyProfiles(state, env);
+  const requirementsConfigs = [];
+  const systemRequirements = codexConfigFile(codexRequirementsPath(env));
+  if (systemRequirements) requirementsConfigs.push(systemRequirements);
+  const managedRequirements = codexManagedRequirementsPreference(env);
+  if (managedRequirements) {
+    requirementsConfigs.push({
+      contents: managedRequirements,
+      file: "managed Codex requirements preferences",
+    });
+  }
+  for (const config of requirementsConfigs) {
+    assertCodexRequirementsSafe(config.contents, config.file);
+  }
   const ordinaryConfigs = [];
   const systemConfig = codexConfigFile(codexSystemConfig(env));
   if (systemConfig) ordinaryConfigs.push(systemConfig);
@@ -2034,6 +2202,7 @@ const WORKFLOW_ATTRIBUTION_PATTERNS = [
   /\b(?:(?:an?|the)\s+)?(?:(?:ai|llm)(?:\s+review(?:er)?)?|review(?:er)?)\s+(?:found|identified|reported|flagged|raised|caught|suggested|requested|required)\b/iu,
   /\b(?:found|identified|reported|flagged|raised|caught|suggested|requested|required)\s+(?:by|during|in|from|through)\s+(?:(?:an?|the)\s+)?(?:(?:ai|llm)(?:\s+review(?:er)?)?|review(?:er)?)\b/iu,
   /\b(?:address(?:es|ed|ing)?|appl(?:y|ies|ied|ying)|fix(?:es|ed|ing)?|resolv(?:e|es|ed|ing)|handl(?:e|es|ed|ing)|incorporat(?:e|es|ed|ing)|implement(?:s|ed|ing)?|clos(?:e|es|ed|ing)|clear(?:s|ed|ing)?|tackl(?:e|es|ed|ing)|satisf(?:y|ies|ied|ying))\s+(?:the\s+)?(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+review(?:er)?|(?:ai|llm)(?:\s+review(?:er)?)?|review(?:er)?)\s+(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance)\b/iu,
+  /\b(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?review(?:er)?\s+(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance)\s+(?:was|were|is|are|has\s+been|have\s+been)\s+(?:addressed|applied|fixed|resolved|handled|incorporated|implemented|closed|cleared|tackled|satisfied)\b/iu,
   /\b(?:ai|llm)[ -]?(?:generated|assisted|reviewed|suggested)\b/iu,
   /\breview(?:er)?[ -]?round\s*#?\d+\b/iu,
 ];
@@ -2117,14 +2286,19 @@ function verificationEvidenceLines(body) {
     if (section !== "Verification") continue;
     if (isVerbatimVerificationCommand(line)) {
       evidence.add(index);
-      commandContinues = true;
+      commandContinues = hasShellContinuationMarker(line);
     } else if (commandContinues && /^\s+\S/u.test(line)) {
       evidence.add(index);
+      commandContinues = hasShellContinuationMarker(line);
     } else {
       commandContinues = false;
     }
   }
   return evidence;
+}
+
+function hasShellContinuationMarker(line) {
+  return /(?:\\|&&|\|\||\|)\s*$/u.test(line);
 }
 
 function commitProseBody(body) {
@@ -2182,7 +2356,7 @@ function inspectCommitMessageWithPolicy(subject, body, options) {
   }
   if (
     /^(?:[-*]\s+)?[A-Za-z0-9][A-Za-z0-9-]*-(?:by|with):.*\b(?:codex|claude|gemini|chatgpt|gpt(?:-\d+(?:\.\d+)*)?|openai|anthropic|opencode|ai|llm|reviewer)\b/imu.test(
-      body,
+      `${subject}\n${body}`,
     )
   ) {
     issues.push("message contains an AI attribution trailer");
