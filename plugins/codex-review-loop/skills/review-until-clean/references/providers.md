@@ -4,7 +4,7 @@ The engine selects the first installed provider in this order when `--provider a
 
 | Provider | Command | Read-only mechanism |
 | --- | --- | --- |
-| `codex` | `codex exec --sandbox read-only --disable hooks review --ephemeral -` | Explicit read-only sandbox, disabled lifecycle hooks, and native Codex review mode |
+| `codex` | Isolated `codex exec review` invocation | Read-only sandbox; hooks, apps, subagents, and discovered MCP servers disabled |
 | `gemini` | `gemini -p ... --output-format json` | Explicit review-only prompt |
 | `claude` | `claude -p ... --permission-mode plan --tools Bash,Read,Glob,Grep` | Plan permission mode and read tools |
 | `opencode` | `opencode run --agent plan ...` | Plan agent |
@@ -12,7 +12,7 @@ The engine selects the first installed provider in this order when `--provider a
 
 Use `doctor` to see which binaries are available. Provider choice is stored in the active run; a saved preference never proves that a binary or account is currently available.
 
-The Codex adapter inherits the user's configured model and reasoning effort so review depth matches direct Codex use. It disables lifecycle hooks, the native review sandbox remains read-only, and `--ephemeral` prevents a saved session. Use `start --isolate-codex-config` only when the run must ignore `config.toml`; authentication is still reused.
+The Codex adapter inherits the user's configured model and reasoning effort so review depth matches direct Codex use. Before each round it inventories effective MCP servers and supplies minimal disabled definitions for every enabled server without forwarding credentials or transport secrets. It also disables lifecycle hooks, apps, and subagents, forces the native read-only sandbox, and uses `--ephemeral` to prevent a saved session. If the MCP inventory cannot be read safely, the round fails closed. Use `start --isolate-codex-config` only when the run must ignore `config.toml`; authentication is still reused.
 
 Codex keeps its native review output. An explicit native verdict such as `No actionable defects found.` or `No in-scope functional findings.` is clean only when it is the sole non-empty output line. Other providers use the exact clean sentinel under the same isolated-line rule.
 

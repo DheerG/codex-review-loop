@@ -120,7 +120,7 @@ function loadActive(repo) {
     if (state.phase === "clean" || state.lastReview?.status === "clean") {
       state.phase = "invalid";
       if (state.maxRounds !== null && state.round >= state.maxRounds) {
-        state.maxRounds = state.round + 1;
+        state.maxRounds = state.round + 2;
       }
       state.lastReview = {
         ...state.lastReview,
@@ -365,13 +365,98 @@ function parseCustomCommand(env) {
   }
 }
 
-export function codexReviewArgs(isolateUserConfig = false) {
+function tomlInlineValue(value) {
+  if (typeof value === "string") return JSON.stringify(value);
+  if (typeof value === "boolean") return String(value);
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => tomlInlineValue(item)).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value)
+      .filter(([, item]) => item !== null && item !== undefined)
+      .map(
+        ([key, item]) =>
+          `${JSON.stringify(key)}=${tomlInlineValue(item)}`,
+      )
+      .join(",")}}`;
+  }
+  throw new CliError("Codex returned an unsupported MCP configuration value.", 3);
+}
+
+export function codexMcpDisableOverride(servers) {
+  if (!Array.isArray(servers)) {
+    throw new CliError("Codex MCP inventory is not an array.", 3);
+  }
+  const disabled = {};
+  for (const server of servers) {
+    if (!server?.enabled) continue;
+    if (typeof server.name !== "string" || !server.name) {
+      throw new CliError("Codex MCP inventory contains an unnamed server.", 3);
+    }
+    if (server.transport?.type === "stdio") {
+      if (typeof server.transport.command !== "string") {
+        throw new CliError(`Codex MCP server ${server.name} has no command.`, 3);
+      }
+      disabled[server.name] = {
+        enabled: false,
+        command: server.transport.command,
+      };
+    } else if (server.transport?.type === "streamable_http") {
+      if (typeof server.transport.url !== "string") {
+        throw new CliError(`Codex MCP server ${server.name} has no URL.`, 3);
+      }
+      disabled[server.name] = {
+        enabled: false,
+        url: server.transport.url,
+      };
+    } else {
+      throw new CliError(
+        `Codex MCP server ${server.name} has an unsupported transport.`,
+        3,
+      );
+    }
+  }
+  return Object.keys(disabled).length > 0
+    ? `mcp_servers=${tomlInlineValue(disabled)}`
+    : null;
+}
+
+function configuredCodexMcpServers(state, env) {
+  const result = run("codex", ["mcp", "list", "--json"], {
+    cwd: state.root,
+    env,
+    allowFailure: true,
+  });
+  if (result.status !== 0) {
+    throw new CliError(
+      `Cannot safely isolate Codex MCP tools: ${(result.stderr || result.stdout).trim()}`,
+      3,
+    );
+  }
+  try {
+    return JSON.parse(result.stdout);
+  } catch (error) {
+    throw new CliError(
+      `Cannot safely parse the Codex MCP inventory: ${error.message}`,
+      3,
+    );
+  }
+}
+
+export function codexReviewArgs(isolateUserConfig = false, mcpServers = []) {
+  const mcpOverride = codexMcpDisableOverride(mcpServers);
   return [
     "exec",
     "--sandbox",
     "read-only",
     "--disable",
     "hooks",
+    "--disable",
+    "apps",
+    "--disable",
+    "multi_agent",
+    ...(mcpOverride ? ["-c", mcpOverride] : []),
     "review",
     "--ephemeral",
     ...(isolateUserConfig ? ["--ignore-user-config"] : []),
@@ -384,7 +469,10 @@ function providerInvocation(state, prompt, env) {
     case "codex":
       return {
         command: "codex",
-        args: codexReviewArgs(Boolean(state.isolateCodexConfig)),
+        args: codexReviewArgs(
+          Boolean(state.isolateCodexConfig),
+          configuredCodexMcpServers(state, env),
+        ),
         input: prompt,
       };
     case "gemini":
@@ -526,6 +614,13 @@ function codexExplicitClean(text) {
   return lines.length === 1 && patterns.some((pattern) => pattern.test(lines[0]));
 }
 
+function containsCodexCleanVerdict(text) {
+  return text
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .some((line) => codexExplicitClean(line));
+}
+
 export function parseReview(output, provider = "custom") {
   const text = output.trim();
   const hasSentinel = text
@@ -553,6 +648,8 @@ export function parseReview(output, provider = "custom") {
     !heading &&
     !prioritySyntax &&
     codexExplicitClean(text);
+  const containsNativeCodexClean =
+    provider === "codex" && containsCodexCleanVerdict(text);
   const nonemptyLines = text
     .split(/\r?\n/u)
     .map((line) => line.trim())
@@ -568,14 +665,14 @@ export function parseReview(output, provider = "custom") {
   ) {
     return { status: "clean", findings: [] };
   }
-  if (!hasSentinel && !hasNativeCodexClean && heading && findings.length > 0) {
+  if (!hasSentinel && !containsNativeCodexClean && heading && findings.length > 0) {
     return { status: "findings", findings };
   }
   return {
     status: "invalid",
     findings,
     reason:
-      hasSentinel || hasNativeCodexClean
+      hasSentinel || containsNativeCodexClean
         ? "The clean verdict was mixed with finding syntax or a findings heading."
         : provider === "codex"
           ? "Expected structured findings or an explicit Codex no-findings verdict."

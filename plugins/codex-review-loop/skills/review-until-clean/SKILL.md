@@ -43,7 +43,7 @@ From the target repository:
    node <skill-dir>/scripts/review-loop.mjs start --provider auto --outcome "<approved outcome>"
    ```
 
-   Add `--base <ref>` only when needed. Codex inherits the user's configured model and reasoning effort while the adapter disables lifecycle hooks; add `--isolate-codex-config` only when isolation is intentional. An active run is resumable with `status`; never start a second run over it.
+   Add `--base <ref>` only when needed. Codex inherits the user's configured model and reasoning effort while the adapter disables lifecycle hooks, apps, subagents, and discovered MCP servers; add `--isolate-codex-config` only when isolation is intentional. An active run is resumable with `status`; never start a second run over it.
 
 3. Before the first review, run the repository's complete relevant verification, including its diff or whitespace checks when available. Complete any resulting fixes before invoking the reviewer:
 

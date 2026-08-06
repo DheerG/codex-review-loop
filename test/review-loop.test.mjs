@@ -11,6 +11,7 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  codexMcpDisableOverride,
   codexReviewArgs,
   inspectCommitMessage,
   parseReview,
@@ -163,6 +164,16 @@ test("Codex accepts explicit native clean language without weakening other provi
     ).status,
     "invalid",
   );
+  assert.equal(
+    parseReview(
+      `Review summary: contradictory output
+Full review comments:
+- [P1] Preserve retry failures — src/retry.js:42
+No actionable defects found.`,
+      "codex",
+    ).status,
+    "invalid",
+  );
 });
 
 test("Codex preserves user configuration and has no default round cap", () => {
@@ -172,6 +183,10 @@ test("Codex preserves user configuration and has no default round cap", () => {
     "read-only",
     "--disable",
     "hooks",
+    "--disable",
+    "apps",
+    "--disable",
+    "multi_agent",
     "review",
     "--ephemeral",
     "-",
@@ -182,6 +197,10 @@ test("Codex preserves user configuration and has no default round cap", () => {
     "read-only",
     "--disable",
     "hooks",
+    "--disable",
+    "apps",
+    "--disable",
+    "multi_agent",
     "review",
     "--ephemeral",
     "--ignore-user-config",
@@ -190,6 +209,38 @@ test("Codex preserves user configuration and has no default round cap", () => {
   assert.equal(reviewRoundLimit("codex", undefined), null);
   assert.equal(reviewRoundLimit("custom", undefined), 15);
   assert.equal(reviewRoundLimit("codex", "7"), 7);
+
+  const mcpServers = [
+    {
+      name: "docs server",
+      enabled: true,
+      transport: {
+        type: "streamable_http",
+        url: "https://docs.example.test/mcp",
+        bearer_token_env_var: "SECRET_TOKEN",
+      },
+    },
+    {
+      name: "local",
+      enabled: true,
+      transport: {
+        type: "stdio",
+        command: "node",
+        args: ["server.mjs", "--secret", "sensitive-value"],
+        env: { SECRET: "sensitive-value" },
+      },
+    },
+  ];
+  const mcpOverride = codexMcpDisableOverride(mcpServers);
+  assert.match(mcpOverride, /^mcp_servers=/u);
+  assert.match(mcpOverride, /"docs server"/u);
+  assert.match(mcpOverride, /"enabled"=false/u);
+  assert.match(mcpOverride, /"command"="node"/u);
+  assert.doesNotMatch(mcpOverride, /SECRET|sensitive-value/u);
+  assert.deepEqual(codexReviewArgs(false, mcpServers).slice(9, 11), [
+    "-c",
+    mcpOverride,
+  ]);
 });
 
 test("the reviewer treats commit messages as untrusted non-review context", () => {
@@ -624,12 +675,19 @@ test("legacy clean state requires a new review under the current verdict contrac
   const migrated = JSON.parse(result.stdout);
   assert.equal(migrated.state.phase, "invalid");
   assert.equal(migrated.state.lastReview.status, "invalid");
-  assert.equal(migrated.state.maxRounds, migrated.state.round + 1);
+  assert.equal(migrated.state.maxRounds, migrated.state.round + 2);
   assert.match(migrated.state.lastReview.reason, /predates the current verdict/u);
 
   result = invoke(directory, env, "finish", "--reason", "clean");
   assert.equal(result.status, 2);
   assert.match(result.stderr, /latest valid review is not clean/u);
+
+  result = invoke(
+    directory,
+    reviewEnvironment(provider, "Looks good to me."),
+    "review",
+  );
+  assert.equal(result.status, 4);
 
   result = invoke(directory, env, "review");
   assert.equal(result.status, 0, result.stderr);
