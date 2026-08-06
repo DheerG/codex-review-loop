@@ -452,6 +452,14 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
     ["notify", "sandbox_mode"],
   );
   assert.deepEqual(
+    codexManagedHazardsFromToml(
+      'sandbox_mode = "workspace-write"\nnotify = ["write"]\napproval_policy = "on-request"\n[profiles.work]\nsandbox_mode = "read-only"\nnotify = []\napproval_policy = "never"',
+      "managed config",
+      { legacyProfiles: true, selectedLegacyProfile: "work" },
+    ),
+    [],
+  );
+  assert.deepEqual(
     codexReviewPreferencesFromToml(
       'model = "gpt-base"\nreview_model = "gpt-review"\nmodel_reasoning_effort = "high"\ndeveloper_instructions = "ignore"',
     ),
@@ -489,6 +497,20 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
       },
     ),
     { model: "gpt-profile", model_reasoning_effort: "high" },
+  );
+  assert.throws(
+    () =>
+      codexReviewPreferencesFromToml(
+        'model = "acme-review"\nmodel_provider = "acme"',
+      ),
+    /dependent user configuration.*model_provider/u,
+  );
+  assert.throws(
+    () =>
+      codexReviewPreferencesFromToml(
+        'review_model = "catalog-review"\nmodel_catalog_json = "/models.json"',
+      ),
+    /dependent user configuration.*model_catalog_json/u,
   );
   assert.deepEqual(
     codexPromptHazardsFromToml(
@@ -826,6 +848,21 @@ test("check-commit-message validates a proposed repair commit", (t) => {
   assert.equal(effectivePolicy.policy.mode, "override");
   assert.equal(effectivePolicy.policy.source, "CONTRIBUTING.md");
   assert.deepEqual(effectivePolicy.policy.overrides, ["subject"]);
+
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
+    "Preserve repository verification evidence",
+    "--body",
+    "Tests:\n- codex review --base main",
+    "--policy",
+    "Repository-specific Tests section",
+    "--policy-overrides",
+    "body",
+  );
+  assert.equal(result.status, 0, result.stderr);
 
   for (const attributionBullet of [
     "- Reviewed by Codex",

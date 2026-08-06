@@ -1036,6 +1036,26 @@ function activeCodexRecordParts(record, options, localSelectedProfile) {
   return null;
 }
 
+function effectiveCodexRecords(records, options, localSelectedProfile) {
+  const ordered = [
+    records.filter((record) => record.parts[0] !== "profiles"),
+    records.filter((record) => record.parts[0] === "profiles"),
+  ];
+  const effective = new Map();
+  for (const group of ordered) {
+    for (const record of group) {
+      const parts = activeCodexRecordParts(
+        record,
+        options,
+        localSelectedProfile,
+      );
+      if (!parts) continue;
+      effective.set(JSON.stringify(parts), { ...record, parts });
+    }
+  }
+  return [...effective.values()];
+}
+
 export function codexReviewPreferencesFromToml(
   contents,
   source = "Codex user config",
@@ -1046,23 +1066,36 @@ export function codexReviewPreferencesFromToml(
     source,
   );
   const preferences = {};
-  const orderedRecords = [
-    records.filter((record) => record.parts[0] !== "profiles"),
-    records.filter((record) => record.parts[0] === "profiles"),
-  ];
-  for (const group of orderedRecords) {
-    for (const record of group) {
-      const parts = activeCodexRecordParts(
-        record,
-        options,
-        selectedLegacyProfile,
+  let modelProvider;
+  let modelCatalog = false;
+  for (const record of effectiveCodexRecords(
+    records,
+    options,
+    selectedLegacyProfile,
+  )) {
+    const { parts } = record;
+    if (
+      parts.length === 1 &&
+      ["model", "review_model", "model_reasoning_effort"].includes(parts[0])
+    ) {
+      preferences[parts[0]] = tomlStringValue(record.value ?? "", source);
+    } else if (parts.length === 1 && parts[0] === "model_provider") {
+      modelProvider = tomlStringValue(record.value ?? "", source);
+    } else if (parts.length === 1 && parts[0] === "model_catalog_json") {
+      modelCatalog = true;
+    }
+  }
+  if (preferences.model || preferences.review_model) {
+    const dependencies = [];
+    if (modelProvider && modelProvider !== "openai") {
+      dependencies.push(`model_provider=${JSON.stringify(modelProvider)}`);
+    }
+    if (modelCatalog) dependencies.push("model_catalog_json");
+    if (dependencies.length > 0) {
+      throw new CliError(
+        `Cannot safely copy Codex model preferences without dependent user configuration: ${dependencies.join(", ")}. Use --isolate-codex-config or remove the dependent model preference.`,
+        3,
       );
-      if (
-        parts?.length === 1 &&
-        ["model", "review_model", "model_reasoning_effort"].includes(parts[0])
-      ) {
-        preferences[parts[0]] = tomlStringValue(record.value ?? "", source);
-      }
     }
   }
   return preferences;
@@ -1087,13 +1120,12 @@ export function codexPromptHazardsFromToml(
     "model_catalog_json",
     "model_instructions_file",
   ]);
-  for (const record of records) {
-    const parts = activeCodexRecordParts(
-      record,
-      options,
-      selectedLegacyProfile,
-    );
-    if (!parts) continue;
+  for (const record of effectiveCodexRecords(
+    records,
+    options,
+    selectedLegacyProfile,
+  )) {
+    const { parts } = record;
     if (parts.length === 1 && promptKeys.has(parts[0])) {
       hazards.add(parts[0]);
     } else if (parts[0] === "auto_review" && parts[1] === "policy") {
@@ -1134,13 +1166,12 @@ export function codexManagedHazardsFromToml(
     source,
   );
   const hazards = new Set();
-  for (const record of records) {
-    const parts = activeCodexRecordParts(
-      record,
-      options,
-      selectedLegacyProfile,
-    );
-    if (!parts) continue;
+  for (const record of effectiveCodexRecords(
+    records,
+    options,
+    selectedLegacyProfile,
+  )) {
+    const { parts } = record;
     if (parts.length === 1 && parts[0] === "notify") {
       if (
         record.value === undefined ||
@@ -1192,13 +1223,13 @@ export function codexApprovalHazardsFromToml(
     source,
   );
   const hazards = new Set();
-  for (const record of records) {
-    const parts = activeCodexRecordParts(
-      record,
-      options,
-      selectedLegacyProfile,
-    );
-    if (parts?.length !== 1) continue;
+  for (const record of effectiveCodexRecords(
+    records,
+    options,
+    selectedLegacyProfile,
+  )) {
+    const { parts } = record;
+    if (parts.length !== 1) continue;
     if (parts[0] === "approval_policy") {
       if (tomlStringValue(record.value ?? "", source) !== "never") {
         hazards.add("approval_policy");
@@ -2332,7 +2363,7 @@ function hasUnambiguousShellSyntax(text) {
   );
 }
 
-function verificationEvidenceLines(body) {
+function verificationEvidenceLines(body, anySection = false) {
   const evidence = new Set();
   let section = null;
   let commandContinues = false;
@@ -2346,7 +2377,7 @@ function verificationEvidenceLines(body) {
       commandContinues = false;
       continue;
     }
-    if (section !== "Verification") continue;
+    if (!anySection && section !== "Verification") continue;
     if (isVerbatimVerificationCommand(line)) {
       evidence.add(index);
       commandContinues = hasShellContinuationMarker(line);
@@ -2364,8 +2395,8 @@ function hasShellContinuationMarker(line) {
   return /(?:\\|&&|\|\||\|)\s*$/u.test(line);
 }
 
-function commitProseBody(body) {
-  const evidence = verificationEvidenceLines(body);
+function commitProseBody(body, anySection = false) {
+  const evidence = verificationEvidenceLines(body, anySection);
   return body
     .split(/\r?\n/u)
     .filter((_, index) => !evidence.has(index))
@@ -2382,7 +2413,7 @@ function longCommitProseLine(body) {
 
 function inspectCommitMessageWithPolicy(subject, body, options) {
   const issues = [];
-  const proseBody = commitProseBody(body);
+  const proseBody = commitProseBody(body, !options.useDefaultBodyFormat);
   if (!subject.trim()) {
     issues.push("subject is empty");
   }
