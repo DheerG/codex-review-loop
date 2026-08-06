@@ -733,6 +733,42 @@ test("check-commit-message validates a proposed repair commit", (t) => {
   assert.equal(result.status, 2);
   assert.match(result.stdout, /AI-workflow attribution/u);
 
+  for (const attribution of [
+    "The defect was identified by an AI reviewer.",
+    "Applied reviewer feedback.",
+  ]) {
+    result = invoke(
+      directory,
+      env,
+      "check-commit-message",
+      "--subject",
+      "Preserve terminal provider errors",
+      "--body",
+      narrativeCommitBody.replace(
+        "Preserve the terminal failure across retry boundaries for batch and streaming callers.",
+        attribution,
+      ),
+      "--product-terms",
+      "The repository implements review-provider behavior",
+    );
+    assert.equal(result.status, 2, `${attribution}\n${result.stdout}`);
+    assert.match(result.stdout, /AI-workflow attribution/u);
+  }
+
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
+    "Preserve terminal provider errors",
+    "--body",
+    `${narrativeCommitBody}\n\nReviewed-by: AI reviewer`,
+    "--product-terms",
+    "The repository implements review-provider behavior",
+  );
+  assert.equal(result.status, 2);
+  assert.match(result.stdout, /AI attribution trailer/u);
+
   result = invoke(
     directory,
     env,
@@ -965,6 +1001,48 @@ process.stdin.on("end", () => {
   result = invoke(directory, env, "review");
   assert.equal(result.status, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).status, "clean");
+});
+
+test("stopped finish archives an unmigratable legacy run", (t) => {
+  const { directory, provider } = repositoryFixture(t);
+  const env = reviewEnvironment(provider, "unused");
+  let result = invoke(
+    directory,
+    env,
+    "start",
+    "--provider",
+    "custom",
+    "--base",
+    "HEAD",
+    "--outcome",
+    "Update the exported value",
+  );
+  assert.equal(result.status, 0, result.stderr);
+
+  const storage = git(
+    directory,
+    "rev-parse",
+    "--path-format=absolute",
+    "--git-path",
+    "codex-review-loop",
+  );
+  const activeFile = path.join(storage, "active.json");
+  const legacy = JSON.parse(readFileSync(activeFile, "utf8"));
+  legacy.schemaVersion = 2;
+  legacy.base = "refs/heads/deleted-before-migration";
+  writeFileSync(activeFile, `${JSON.stringify(legacy, null, 2)}\n`);
+
+  result = invoke(directory, env, "status");
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /does not resolve|recover the original commit/u);
+
+  result = invoke(directory, env, "finish", "--reason", "stopped");
+  assert.equal(result.status, 0, result.stderr);
+  const finished = JSON.parse(result.stdout);
+  const archived = JSON.parse(readFileSync(finished.archive, "utf8"));
+  assert.equal(finished.status, "finished");
+  assert.match(archived.migrationError, /does not resolve|recover/u);
+  assert.equal(existsSync(activeFile), false);
 });
 
 test("a clean result is bound to the reviewed snapshot", (t) => {

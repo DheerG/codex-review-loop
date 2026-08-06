@@ -121,7 +121,7 @@ function readJson(file) {
   }
 }
 
-function loadActive(repo) {
+function loadActive(repo, options = {}) {
   if (!existsSync(repo.activeFile)) {
     throw new CliError("No active review loop. Start one with `start`.", 2);
   }
@@ -131,7 +131,13 @@ function loadActive(repo) {
   }
   if (state.schemaVersion < STATE_SCHEMA_VERSION) {
     const previousSchema = state.schemaVersion;
-    state.base = pinPersistedBase(repo.root, state);
+    try {
+      state.base = pinPersistedBase(repo.root, state);
+    } catch (error) {
+      if (!options.allowUnmigrated) throw error;
+      state.migrationError = error.message;
+      return state;
+    }
     state.schemaVersion = STATE_SCHEMA_VERSION;
     if (
       previousSchema === 1 &&
@@ -1777,6 +1783,9 @@ const WORKFLOW_ATTRIBUTION_PATTERNS = [
   /\bper\s+(?:(?:the|a)\s+(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?(?:review|reviewer|feedback|findings?|comments?)|(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))|(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?review(?:er)?\s+(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu,
   /\bfollowing\s+(?:(?:the|a)\s+)?(?:(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?review(?:er)?\s+)?(?:feedback|findings?|comments?)|(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?review(?:er)?|(?:codex|claude|gemini|chatgpt|openai|anthropic))\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu,
   /\b(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?review(?:er)?\s+(?:asked|requested|required|suggested|said|recommended|instructed|flagged|identified)\b/iu,
+  /\b(?:(?:an?|the)\s+)?(?:(?:ai|llm)(?:\s+review(?:er)?)?|review(?:er)?)\s+(?:found|identified|reported|flagged|raised|caught|suggested|requested|required)\b/iu,
+  /\b(?:found|identified|reported|flagged|raised|caught|suggested|requested|required)\s+(?:by|during|in|from|through)\s+(?:(?:an?|the)\s+)?(?:(?:ai|llm)(?:\s+review(?:er)?)?|review(?:er)?)\b/iu,
+  /\b(?:address(?:es|ed|ing)?|appl(?:y|ies|ied|ying)|fix(?:es|ed|ing)?|resolv(?:e|es|ed|ing)|handl(?:e|es|ed|ing)|incorporat(?:e|es|ed|ing)|implement(?:s|ed|ing)?|clos(?:e|es|ed|ing)|clear(?:s|ed|ing)?|tackl(?:e|es|ed|ing)|satisf(?:y|ies|ied|ying))\s+(?:the\s+)?(?:(?:(?:ai|llm)\s+)?review(?:er)?\s+)?(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance)\b/iu,
   /\b(?:ai|llm)[ -]?(?:generated|assisted|reviewed|suggested)\b/iu,
   /\breview(?:er)?[ -]?round\s*#?\d+\b/iu,
 ];
@@ -1852,11 +1861,11 @@ function inspectCommitMessageWithPolicy(subject, body, options) {
     );
   }
   if (
-    /^co-authored-by:.*(?:codex|claude|gemini|chatgpt|openai|anthropic|\bai\b)/imu.test(
+    /^(?:co-authored-by|reviewed-by|assisted-by|generated-by):.*(?:codex|claude|gemini|chatgpt|openai|anthropic|\bai\b|\bllm\b)/imu.test(
       body,
     )
   ) {
-    issues.push("message contains an AI co-author trailer");
+    issues.push("message contains an AI attribution trailer");
   }
   if (options.useDefaultSubjectFormat) {
     if (subject.length > 72) {
@@ -1991,7 +2000,7 @@ function finishCommand(repo, options) {
       2,
     );
   }
-  const state = loadActive(repo);
+  const state = loadActive(repo, { allowUnmigrated: reason !== "clean" });
   if (reason === "clean") {
     if (state.lastReview?.status !== "clean") {
       throw new CliError(
