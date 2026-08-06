@@ -26,6 +26,7 @@ import {
   codexReviewPreferencesFromToml,
   codexRequirementsHazardsFromToml,
   codexRequirementsPath,
+  codexSelectedLegacyProfileFromConfigs,
   codexSelectedLegacyProfileFromToml,
   inspectCommitMessage,
   parseReview,
@@ -379,6 +380,10 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
     [],
   );
   assert.deepEqual(
+    codexManagedHazardsFromToml('sandbox_mode = """\nread-only"""'),
+    [],
+  );
+  assert.deepEqual(
     codexManagedHazardsFromToml('default_permissions = "read-only"'),
     ["default_permissions"],
   );
@@ -471,6 +476,19 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
       { legacyProfiles: true },
     ),
     { model: "gpt-profile", review_model: "gpt-review" },
+  );
+  assert.deepEqual(
+    codexReviewPreferencesFromToml(
+      '[profiles.work]\nmodel = """\ngpt-profile"""\nmodel_reasoning_effort = "high"',
+      "legacy user config",
+      {
+        legacyProfiles: true,
+        selectedLegacyProfile: codexSelectedLegacyProfileFromConfigs([
+          { contents: 'profile = "work"', file: "system config" },
+        ]),
+      },
+    ),
+    { model: "gpt-profile", model_reasoning_effort: "high" },
   );
   assert.deepEqual(
     codexPromptHazardsFromToml(
@@ -811,7 +829,9 @@ test("check-commit-message validates a proposed repair commit", (t) => {
 
   for (const attributionBullet of [
     "- Reviewed by Codex",
+    "- Reviewed by Codex with --strict",
     "- Address OpenCode review feedback",
+    "- Codex review passed",
     "- Tests suggested by Codex all passed",
   ]) {
     result = invoke(

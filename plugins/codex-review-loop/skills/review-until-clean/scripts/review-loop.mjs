@@ -929,14 +929,9 @@ function codexConfigRecords(contents, source) {
   const records = [];
   const lines = contents.split(/\r?\n/u);
   let table = [];
-  let multiline = null;
   let selectedLegacyProfile = null;
   for (let lineNumber = 0; lineNumber < lines.length; lineNumber += 1) {
     const rawLine = lines[lineNumber];
-    if (multiline) {
-      if (rawLine.includes(multiline)) multiline = null;
-      continue;
-    }
     const line = stripTomlComment(rawLine).trim();
     if (!line) continue;
     if (line.startsWith("[")) {
@@ -971,17 +966,37 @@ function codexConfigRecords(contents, source) {
         );
       }
     }
+    for (const delimiter of ['"""', "'''"]) {
+      const start = value.indexOf(delimiter);
+      if (
+        !value.trimStart().startsWith(delimiter) ||
+        value.indexOf(delimiter, start + 3) >= 0
+      ) {
+        continue;
+      }
+      let closed = false;
+      while (lineNumber + 1 < lines.length) {
+        lineNumber += 1;
+        const continuation = lines[lineNumber];
+        const end = continuation.indexOf(delimiter);
+        value += `\n${end < 0 ? continuation : continuation.slice(0, end + 3)}`;
+        if (end >= 0) {
+          closed = true;
+          break;
+        }
+      }
+      if (!closed) {
+        throw new CliError(
+          `Cannot safely parse a multiline TOML string in ${source}.`,
+          3,
+        );
+      }
+    }
     const parts = [...table, ...key];
     records.push({ parts, value });
     expandInlineTomlRecords(records, parts, value, source);
     if (parts.length === 1 && parts[0] === "profile") {
       selectedLegacyProfile = tomlStringValue(value, source);
-    }
-    for (const delimiter of ['"""', "'''"]) {
-      const start = value.indexOf(delimiter);
-      if (start >= 0 && value.indexOf(delimiter, start + 3) < 0) {
-        multiline = delimiter;
-      }
     }
   }
   return { records, selectedLegacyProfile };
@@ -992,6 +1007,18 @@ export function codexSelectedLegacyProfileFromToml(
   source = "Codex config",
 ) {
   return codexConfigRecords(contents, source).selectedLegacyProfile;
+}
+
+export function codexSelectedLegacyProfileFromConfigs(configs) {
+  let selectedLegacyProfile = null;
+  for (const config of configs) {
+    const selected = codexSelectedLegacyProfileFromToml(
+      config.contents,
+      config.file,
+    );
+    if (selected !== null) selectedLegacyProfile = selected;
+  }
+  return selectedLegacyProfile;
 }
 
 function activeCodexRecordParts(record, options, localSelectedProfile) {
@@ -1441,13 +1468,10 @@ function configuredCodexMcpServers(state, env) {
 
   let selectedLegacyProfile = null;
   if (legacyProfiles) {
-    for (const config of [...ordinaryConfigs, ...managedConfigs]) {
-      const selected = codexSelectedLegacyProfileFromToml(
-        config.contents,
-        config.file,
-      );
-      if (selected !== null) selectedLegacyProfile = selected;
-    }
+    selectedLegacyProfile = codexSelectedLegacyProfileFromConfigs([
+      ...ordinaryConfigs,
+      ...managedConfigs,
+    ]);
   }
   const options = { legacyProfiles, selectedLegacyProfile };
   const names = new Set();
@@ -1499,10 +1523,30 @@ function configuredCodexReviewPreferences(state, env) {
   if (state.isolateCodexConfig) return {};
   const userConfig = codexConfigFile(path.join(codexHome(env), "config.toml"));
   if (!userConfig) return {};
+  const legacyProfiles = codexUsesLegacyProfiles(state, env);
+  let selectedLegacyProfile = null;
+  if (legacyProfiles) {
+    const configs = [];
+    const systemConfig = codexConfigFile(codexSystemConfig(env));
+    if (systemConfig) configs.push(systemConfig);
+    configs.push(userConfig);
+    for (const managedFile of codexManagedConfigPaths(env)) {
+      const config = codexConfigFile(managedFile);
+      if (config) configs.push(config);
+    }
+    const managedPreference = codexManagedPreference(env);
+    if (managedPreference) {
+      configs.push({
+        contents: managedPreference,
+        file: "managed Codex preferences",
+      });
+    }
+    selectedLegacyProfile = codexSelectedLegacyProfileFromConfigs(configs);
+  }
   return codexReviewPreferencesFromToml(
     userConfig.contents,
     userConfig.file,
-    { legacyProfiles: codexUsesLegacyProfiles(state, env) },
+    { legacyProfiles, selectedLegacyProfile },
   );
 }
 
@@ -2203,6 +2247,7 @@ const WORKFLOW_ATTRIBUTION_PATTERNS = [
   /\b(?:found|identified|reported|flagged|raised|caught|suggested|requested|required)\s+(?:by|during|in|from|through)\s+(?:(?:an?|the)\s+)?(?:(?:ai|llm)(?:\s+review(?:er)?)?|review(?:er)?)\b/iu,
   /\b(?:address(?:es|ed|ing)?|appl(?:y|ies|ied|ying)|fix(?:es|ed|ing)?|resolv(?:e|es|ed|ing)|handl(?:e|es|ed|ing)|incorporat(?:e|es|ed|ing)|implement(?:s|ed|ing)?|clos(?:e|es|ed|ing)|clear(?:s|ed|ing)?|tackl(?:e|es|ed|ing)|satisf(?:y|ies|ied|ying))\s+(?:the\s+)?(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+review(?:er)?|(?:ai|llm)(?:\s+review(?:er)?)?|review(?:er)?)\s+(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance)\b/iu,
   /\b(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?review(?:er)?\s+(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance)\s+(?:was|were|is|are|has\s+been|have\s+been)\s+(?:addressed|applied|fixed|resolved|handled|incorporated|implemented|closed|cleared|tackled|satisfied)\b/iu,
+  /\b(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?review(?:er)?(?:\s+loop)?\s+(?:passed|completed|succeeded|finished|approved|was\s+clean)\b/iu,
   /\b(?:ai|llm)[ -]?(?:generated|assisted|reviewed|suggested)\b/iu,
   /\breview(?:er)?[ -]?round\s*#?\d+\b/iu,
 ];
@@ -2245,9 +2290,7 @@ function isVerbatimVerificationCommand(line) {
   const trimmed = line.trim();
   const bullet = trimmed.match(/^[-*]\s+(.+)/u);
   return (
-    (bullet &&
-      (!hasWorkflowAttribution(bullet[1]) ||
-        hasUnambiguousShellSyntax(bullet[1]))) ||
+    (bullet && isCommandShapedVerification(bullet[1])) ||
     /^\$\s+\S/u.test(trimmed) ||
     /^`[^`]+`$/u.test(trimmed)
   );
@@ -2257,6 +2300,27 @@ function hasWorkflowAttribution(text) {
   return WORKFLOW_ATTRIBUTION_PATTERNS.some((pattern) => pattern.test(text));
 }
 
+function startsWithWorkflowAttribution(text) {
+  return WORKFLOW_ATTRIBUTION_PATTERNS.some(
+    (pattern) => pattern.exec(text)?.index === 0,
+  );
+}
+
+function isCommandShapedVerification(text) {
+  if (/^\$\s+\S/u.test(text) || /^`[^`]+`$/u.test(text)) return true;
+  if (startsWithWorkflowAttribution(text)) return false;
+  const pathCommand = /^(?:\/|\.\/|\.\.\/|~\/)\S+/u.test(text);
+  const executable = text.match(/^([a-z0-9][A-Za-z0-9_.@+/-]*)(?:\s|$)/u)?.[1];
+  if (!pathCommand && !executable) return false;
+  const commonCommand = /^(?:ava|bash|biome|bun|bundle|cargo|claude|cmake|codex|composer|ctest|deno|dotnet|eslint|gemini|gh|git|go|gradle|jest|make|mix|mocha|mvn|node|npm|npx|opencode|php|pip|pip3|pnpm|powershell|prettier|pytest|python|python3|rake|rebar3|ruby|rustc|sh|swift|tsc|uv|vitest|xcodebuild|yarn|zsh)$/u.test(
+    executable ?? "",
+  );
+  const explicitSyntax = pathCommand || hasUnambiguousShellSyntax(text);
+  if (!commonCommand && !explicitSyntax) return false;
+  const attributionLike = hasWorkflowAttribution(text);
+  return !attributionLike || explicitSyntax;
+}
+
 function hasUnambiguousShellSyntax(text) {
   return (
     /^\$\s+\S/u.test(text) ||
@@ -2264,7 +2328,6 @@ function hasUnambiguousShellSyntax(text) {
     /^(?:\/|\.\/|\.\.\/|~\/)/u.test(text) ||
     /(?:^|\s)(?:--?[A-Za-z0-9]|[A-Za-z_][A-Za-z0-9_]*=)/u.test(text) ||
     /(?:^|\s)(?:&&|\|\||[|;<>])(?:\s|$)/u.test(text) ||
-    /["'`]/u.test(text) ||
     /\\\s*$/u.test(text)
   );
 }
