@@ -119,8 +119,8 @@ function loadActive(repo) {
     state.schemaVersion = STATE_SCHEMA_VERSION;
     if (state.phase === "clean" || state.lastReview?.status === "clean") {
       state.phase = "invalid";
-      if (state.maxRounds !== null && state.round >= state.maxRounds) {
-        state.maxRounds = state.round + 2;
+      if (state.maxRounds !== null) {
+        state.maxRounds = Math.max(state.maxRounds, state.round + 2);
       }
       state.lastReview = {
         ...state.lastReview,
@@ -400,7 +400,7 @@ export function codexMcpDisableOverride(servers) {
       }
       disabled[server.name] = {
         enabled: false,
-        command: server.transport.command,
+        command: "codex-review-loop-disabled-mcp",
       };
     } else if (server.transport?.type === "streamable_http") {
       if (typeof server.transport.url !== "string") {
@@ -408,7 +408,7 @@ export function codexMcpDisableOverride(servers) {
       }
       disabled[server.name] = {
         enabled: false,
-        url: server.transport.url,
+        url: "https://disabled.invalid/mcp",
       };
     } else {
       throw new CliError(
@@ -430,7 +430,7 @@ function configuredCodexMcpServers(state, env) {
   });
   if (result.status !== 0) {
     throw new CliError(
-      `Cannot safely isolate Codex MCP tools: ${(result.stderr || result.stdout).trim()}`,
+      "Cannot safely isolate Codex MCP tools: `codex mcp list --json` failed.",
       3,
     );
   }
@@ -442,6 +442,12 @@ function configuredCodexMcpServers(state, env) {
       3,
     );
   }
+}
+
+export function codexMcpServersForReview(state, env) {
+  return state.isolateCodexConfig
+    ? []
+    : configuredCodexMcpServers(state, env);
 }
 
 export function codexReviewArgs(isolateUserConfig = false, mcpServers = []) {
@@ -471,7 +477,7 @@ function providerInvocation(state, prompt, env) {
         command: "codex",
         args: codexReviewArgs(
           Boolean(state.isolateCodexConfig),
-          configuredCodexMcpServers(state, env),
+          codexMcpServersForReview(state, env),
         ),
         input: prompt,
       };
@@ -618,7 +624,14 @@ function containsCodexCleanVerdict(text) {
   return text
     .split(/\r?\n/u)
     .map((line) => line.trim())
-    .some((line) => codexExplicitClean(line));
+    .some((line) =>
+      codexExplicitClean(
+        line.replace(
+          /^(?:review\s+summary|summary|verdict|result):\s*/iu,
+          "",
+        ),
+      ),
+    );
 }
 
 export function parseReview(output, provider = "custom") {
@@ -993,8 +1006,9 @@ const PRODUCT_TERM_PATTERNS = [
 ];
 
 const WORKFLOW_ATTRIBUTION_PATTERNS = [
-  /\b(?:reviewed|generated|suggested|assisted)\s+(?:by|with)\s+(?:codex|claude|gemini|chatgpt|openai|anthropic)\b/iu,
-  /\b(?:codex|claude|gemini|chatgpt|openai|anthropic)[\s-]+(?:reviewed|generated|suggested|assisted)\b/iu,
+  /\b(?:reviewed|generated|suggested|assisted|authored|written|created|made|produced)\s+(?:by|with)\s+(?:codex|claude|gemini|chatgpt|openai|anthropic)\b/iu,
+  /\b(?:codex|claude|gemini|chatgpt|openai|anthropic)[\s-]+(?:reviewed|generated|suggested|assisted|authored|written|created|made|produced)\b/iu,
+  /\b(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance)\s+(?:from|by)\s+(?:codex|claude|gemini|chatgpt|openai|anthropic)\b/iu,
   /\b(?:found|identified|reported|flagged|raised|caught|suggested|requested|required)\s+(?:by|during|in|from|through)\s+(?:(?:the|a)\s+)?(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?(?:review|reviewer|feedback|findings?|comments?)|(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu,
   /\b(?:per|based\s+on|because\s+of|prompted\s+by|in\s+response\s+to)\s+(?:(?:the|a)\s+)?(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?(?:review|reviewer|feedback|findings?|comments?)|(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu,
   /\bfollowing\s+(?:(?:the|a)\s+)?(?:(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?review(?:er)?\s+)?(?:feedback|findings?|comments?)|(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?review(?:er)?|(?:codex|claude|gemini|chatgpt|openai|anthropic))\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu,

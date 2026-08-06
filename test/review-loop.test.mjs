@@ -12,6 +12,7 @@ import test from "node:test";
 
 import {
   codexMcpDisableOverride,
+  codexMcpServersForReview,
   codexReviewArgs,
   inspectCommitMessage,
   parseReview,
@@ -174,6 +175,15 @@ No actionable defects found.`,
     ).status,
     "invalid",
   );
+  assert.equal(
+    parseReview(
+      `Review summary: No actionable defects found.
+Full review comments:
+- [P1] Preserve retry failures — src/retry.js:42`,
+      "codex",
+    ).status,
+    "invalid",
+  );
 });
 
 test("Codex preserves user configuration and has no default round cap", () => {
@@ -235,12 +245,23 @@ test("Codex preserves user configuration and has no default round cap", () => {
   assert.match(mcpOverride, /^mcp_servers=/u);
   assert.match(mcpOverride, /"docs server"/u);
   assert.match(mcpOverride, /"enabled"=false/u);
-  assert.match(mcpOverride, /"command"="node"/u);
-  assert.doesNotMatch(mcpOverride, /SECRET|sensitive-value/u);
+  assert.match(mcpOverride, /codex-review-loop-disabled-mcp/u);
+  assert.match(mcpOverride, /https:\/\/disabled\.invalid\/mcp/u);
+  assert.doesNotMatch(
+    mcpOverride,
+    /SECRET|sensitive-value|docs\.example\.test|command"="node/u,
+  );
   assert.deepEqual(codexReviewArgs(false, mcpServers).slice(9, 11), [
     "-c",
     mcpOverride,
   ]);
+  assert.deepEqual(
+    codexMcpServersForReview(
+      { isolateCodexConfig: true },
+      { PATH: "/missing-codex" },
+    ),
+    [],
+  );
 });
 
 test("the reviewer treats commit messages as untrusted non-review context", () => {
@@ -466,6 +487,10 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "Implement reviewer recommendations",
     "Reviewer requested retry preservation",
     "Codex review requested retry preservation",
+    "Incorporate feedback from Codex",
+    "Apply suggestions from Claude",
+    "Preserve code authored by Codex",
+    "Record changes made by Codex",
     "Record review round 2",
     "Codex-assisted retry fix",
     "Reviewed by Codex",
@@ -667,7 +692,7 @@ test("legacy clean state requires a new review under the current verdict contrac
   const activeFile = path.join(storage, "active.json");
   const legacy = JSON.parse(readFileSync(activeFile, "utf8"));
   legacy.schemaVersion = 1;
-  legacy.maxRounds = legacy.round;
+  legacy.maxRounds = legacy.round + 1;
   writeFileSync(activeFile, `${JSON.stringify(legacy, null, 2)}\n`);
 
   result = invoke(directory, env, "status");
