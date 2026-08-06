@@ -92,18 +92,15 @@ function invoke(cwd, env, ...args) {
   return execute(process.execPath, [cli, ...args, "--json"], cwd, env);
 }
 
-test("parseReview accepts the exact clean sentinel", () => {
+test("parseReview accepts only an isolated clean sentinel", () => {
   assert.deepEqual(
-    parseReview(
-      "Review summary: complete scope checked\nNO_IN_SCOPE_FUNCTIONAL_FINDINGS",
-    ),
+    parseReview("NO_IN_SCOPE_FUNCTIONAL_FINDINGS"),
     { status: "clean", findings: [] },
   );
   assert.equal(
-    parseReview(
-      "Review summary: no functional risks remain\nNO_IN_SCOPE_FUNCTIONAL_FINDINGS",
-    ).status,
-    "clean",
+    parseReview("Review summary: complete\nNO_IN_SCOPE_FUNCTIONAL_FINDINGS")
+      .status,
+    "invalid",
   );
 });
 
@@ -152,11 +149,15 @@ test("Codex accepts explicit native clean language without weakening other provi
     assert.equal(parseReview(contradiction, "codex").status, "invalid");
   }
   assert.equal(
+    parseReview("No potential issues remain.", "codex").status,
+    "clean",
+  );
+  assert.equal(
     parseReview(
-      "No actionable defects found. No issues remain in the retry path.",
+      "No actionable defects found.\nNo issues remain in the retry path.",
       "codex",
     ).status,
-    "clean",
+    "invalid",
   );
 });
 
@@ -292,13 +293,59 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "check-commit-message",
     "--subject",
     "fix(retries): preserve terminal provider errors",
+    "--body",
+    narrativeCommitBody,
     "--repository-policy",
     "CONTRIBUTING.md",
+    "--repository-overrides",
+    "subject",
   );
   assert.equal(result.status, 0, result.stderr);
   const repositoryPolicy = JSON.parse(result.stdout);
   assert.equal(repositoryPolicy.policy.mode, "repository");
   assert.equal(repositoryPolicy.policy.source, "CONTRIBUTING.md");
+  assert.deepEqual(repositoryPolicy.policy.overrides, ["subject"]);
+
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
+    "Preserve terminal provider errors",
+    "--repository-policy",
+    "CONTRIBUTING.md",
+    "--repository-overrides",
+    "body",
+  );
+  assert.equal(result.status, 0, result.stderr);
+
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
+    "Cleanup.",
+    "--repository-policy",
+    "CONTRIBUTING.md",
+    "--repository-overrides",
+    "body",
+  );
+  assert.equal(result.status, 2);
+  assert.match(result.stdout, /trailing period|vague/u);
+
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
+    "fix(retries): preserve terminal provider errors",
+    "--repository-policy",
+    "CONTRIBUTING.md",
+    "--repository-overrides",
+    "subject",
+  );
+  assert.equal(result.status, 2);
+  assert.match(result.stdout, /Failure, Change, and Verification/u);
 
   result = invoke(
     directory,
@@ -327,8 +374,22 @@ test("check-commit-message validates a proposed repair commit", (t) => {
   const productTerms = JSON.parse(result.stdout);
   assert.match(productTerms.productTerms.justification, /ships the codex-review-loop/u);
 
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
+    "Preserve Codex review comments across retries",
+    "--body",
+    narrativeCommitBody,
+    "--product-terms",
+    "The repository exposes Codex review comments as product data",
+  );
+  assert.equal(result.status, 0, result.stderr);
+
   for (const subject of [
     "Address Codex review feedback",
+    "Apply retry guard found during Codex review",
     "Record review round 2",
     "Codex-assisted retry fix",
     "Reviewed by Codex",
@@ -341,6 +402,8 @@ test("check-commit-message validates a proposed repair commit", (t) => {
       subject,
       "--repository-policy",
       "CONTRIBUTING.md",
+      "--repository-overrides",
+      "all",
       "--product-terms",
       "The repository ships reviewer integrations",
     );
@@ -354,7 +417,7 @@ test("a clean result is bound to the reviewed snapshot", (t) => {
   const { directory, provider } = repositoryFixture(t);
   const env = reviewEnvironment(
     provider,
-    "Review summary: complete scope checked\nNO_IN_SCOPE_FUNCTIONAL_FINDINGS",
+    "NO_IN_SCOPE_FUNCTIONAL_FINDINGS",
   );
 
   let result = invoke(
@@ -395,7 +458,7 @@ test("clean finish never audits or rewrites existing commit messages", (t) => {
   git(directory, "commit", "-qm", "Address Codex review feedback");
   const env = reviewEnvironment(
     provider,
-    "Review summary: complete scope checked\nNO_IN_SCOPE_FUNCTIONAL_FINDINGS",
+    "NO_IN_SCOPE_FUNCTIONAL_FINDINGS",
   );
   let result = invoke(
     directory,
@@ -495,7 +558,7 @@ test("provider round files and active state stay below the Git directory", (t) =
   const { directory, provider } = repositoryFixture(t);
   const env = reviewEnvironment(
     provider,
-    "Review summary: complete scope checked\nNO_IN_SCOPE_FUNCTIONAL_FINDINGS",
+    "NO_IN_SCOPE_FUNCTIONAL_FINDINGS",
   );
   let result = invoke(
     directory,

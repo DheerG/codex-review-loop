@@ -293,10 +293,8 @@ export function reviewPrompt(state, files) {
   const fileList = files.map((file) => `- ${file}`).join("\n");
   const cleanInstruction =
     state.provider === "codex"
-      ? `Review summary: <brief summary>
-No in-scope functional findings.`
-      : `Review summary: <brief summary>
-${CLEAN_SENTINEL}`;
+      ? "No in-scope functional findings."
+      : CLEAN_SENTINEL;
   return `You are the independent final reviewer. Work read-only: do not edit files, stage changes, commit, or invoke another writing agent.
 
 Approved outcome:
@@ -495,23 +493,15 @@ function providerErrorKind(result) {
 
 function codexExplicitClean(text) {
   const patterns = [
-    /\bno\s+(?:(?:in-scope|actionable|functional|material)\s+){0,3}(?:findings?|defects?|issues?|bugs?)(?:\s+(?:were\s+)?(?:found|identified|detected))?\b/iu,
-    /\b(?:found|identified|detected)\s+no\s+(?:(?:in-scope|actionable|functional|material)\s+){0,3}(?:findings?|defects?|issues?|bugs?)\b/iu,
-    /\b(?:did\s+not|didn't)\s+(?:find|identify|detect)\s+(?:any\s+)?(?:(?:in-scope|actionable|functional|material)\s+){0,3}(?:findings?|defects?|issues?|bugs?)\b/iu,
+    /^no\s+(?:(?:in-scope|actionable|functional|material|potential|remaining)\s+){0,3}(?:findings?|defects?|issues?|bugs?)(?:\s+(?:(?:were\s+)?(?:found|identified|detected)|remains?))?[.!]?$/iu,
+    /^(?:i\s+)?(?:found|identified|detected)\s+no\s+(?:(?:in-scope|actionable|functional|material)\s+){0,3}(?:findings?|defects?|issues?|bugs?)[.!]?$/iu,
+    /^(?:i\s+)?(?:did\s+not|didn't)\s+(?:find|identify|detect)\s+(?:any\s+)?(?:(?:in-scope|actionable|functional|material)\s+){0,3}(?:findings?|defects?|issues?|bugs?)[.!]?$/iu,
   ];
-  const match = patterns.map((pattern) => text.match(pattern)).find(Boolean);
-  if (!match) return false;
-  const start = match.index ?? 0;
-  const remainder = `${text.slice(0, start)} ${text.slice(
-    start + match[0].length,
-  )}`;
-  return !hasContradictoryQualification(remainder);
-}
-
-function hasContradictoryQualification(text) {
-  return /\b(?:but|however|except|although|though|yet|fails?|breaks?|broken|incorrect)\b|\b(?:a|an|another|one|two|three|four|five|six|seven|eight|nine|ten|\d+|some|several|many|multiple|remaining|potential|possible|the)\s+(?:(?:remaining|potential|possible)\s+)?(?:concerns?|problems?|risks?|failures?|bugs?|defects?|findings?|issues?)\b|\bthere(?:'s| is| are)\s+(?:(?:a|an|one|two|three|several|some|multiple|\d+)\s+)?(?:concerns?|problems?|risks?|failures?|bugs?|defects?|findings?|issues?)\b/iu.test(
-    text,
-  );
+  const lines = text
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  return lines.length === 1 && patterns.some((pattern) => pattern.test(lines[0]));
 }
 
 export function parseReview(output, provider = "custom") {
@@ -541,12 +531,12 @@ export function parseReview(output, provider = "custom") {
     !heading &&
     !prioritySyntax &&
     codexExplicitClean(text);
-  const sentinelRemainder = text
+  const nonemptyLines = text
     .split(/\r?\n/u)
-    .filter((line) => line.trim() !== CLEAN_SENTINEL)
-    .join("\n");
+    .map((line) => line.trim())
+    .filter(Boolean);
   const hasValidSentinel =
-    hasSentinel && !hasContradictoryQualification(sentinelRemainder);
+    nonemptyLines.length === 1 && nonemptyLines[0] === CLEAN_SENTINEL;
 
   if (
     (hasValidSentinel || hasNativeCodexClean) &&
@@ -877,15 +867,16 @@ async function reviewCommand(repo, env) {
 }
 
 const PRODUCT_TERM_PATTERNS = [
-  /\b(?:codex|claude|gemini|chatgpt|openai|anthropic)\b.{0,50}\b(?:review|reviewer|loop)\b/iu,
-  /\b(?:review|reviewer|loop)\b.{0,50}\b(?:codex|claude|gemini|chatgpt|openai|anthropic)\b/iu,
+  /\b(?:codex|claude|gemini|chatgpt|openai|anthropic)\b.{0,50}\b(?:review|reviewer|feedback|findings?|comments?|loop|suggestions?)\b/iu,
+  /\b(?:review|reviewer|feedback|findings?|comments?|loop|suggestions?)\b.{0,50}\b(?:codex|claude|gemini|chatgpt|openai|anthropic)\b/iu,
 ];
 
 const WORKFLOW_ATTRIBUTION_PATTERNS = [
-  /\b(?:codex|claude|gemini|chatgpt|openai|anthropic)\b.{0,50}\b(?:feedback|findings?|comments?|suggest(?:ion|ed|s)?)\b/iu,
-  /\b(?:feedback|findings?|comments?|suggest(?:ion|ed|s)?)\b.{0,50}\b(?:codex|claude|gemini|chatgpt|openai|anthropic)\b/iu,
   /\b(?:reviewed|generated|suggested|assisted)\s+(?:by|with)\s+(?:codex|claude|gemini|chatgpt|openai|anthropic)\b/iu,
   /\b(?:codex|claude|gemini|chatgpt|openai|anthropic)[\s-]+(?:reviewed|generated|suggested|assisted)\b/iu,
+  /\b(?:found|identified|reported|flagged|raised|caught|suggested|requested|required)\s+(?:by|during|in|from|through)\s+(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?(?:review|reviewer|feedback|findings?|comments?)\b/iu,
+  /\b(?:after|following|per|during|from|in\s+response\s+to)\s+(?:(?:the|a)\s+)?(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?(?:review|reviewer|feedback|findings?|comments?)\b/iu,
+  /\b(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+(?:found|identified|reported|flagged|raised|caught|suggested|requested|required)\b/iu,
   /\b(?:ai|llm)[ -]?(?:generated|assisted|reviewed|suggested)\b/iu,
   /\breview(?:er)?[ -]?round\s*#?\d+\b/iu,
 ];
@@ -903,7 +894,8 @@ function hasAttribution(text, allowProductTerms) {
 export function inspectCommitMessage(subject, body = "") {
   return inspectCommitMessageWithPolicy(subject, body, {
     allowProductTerms: false,
-    useDefaultFormat: true,
+    useDefaultBodyFormat: true,
+    useDefaultSubjectFormat: true,
   });
 }
 
@@ -929,7 +921,7 @@ function inspectCommitMessageWithPolicy(subject, body, options) {
     issues.push("subject is empty");
   }
   if (
-    /\b(?:address|apply|fix)(?:es|ed|ing)?\s+(?:the\s+)?review(?:er)?\s+(?:feedback|findings?|comments?)\b/iu.test(
+    /\b(?:address|apply|fix)(?:es|ed|ing)?\s+(?:the\s+)?(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?review(?:er)?\s+(?:feedback|findings?|comments?)\b/iu.test(
       subject,
     ) ||
     /\b(?:review(?:er)?[ -]?round|codex fixes|claude fixes|ai review)\b/iu.test(
@@ -960,7 +952,7 @@ function inspectCommitMessageWithPolicy(subject, body, options) {
   ) {
     issues.push("message contains an AI co-author trailer");
   }
-  if (options.useDefaultFormat) {
+  if (options.useDefaultSubjectFormat) {
     if (subject.length > 72) {
       issues.push(`subject is ${subject.length} characters; maximum is 72`);
     }
@@ -974,6 +966,8 @@ function inspectCommitMessageWithPolicy(subject, body, options) {
     ) {
       issues.push("subject is vague");
     }
+  }
+  if (options.useDefaultBodyFormat) {
     if (!body.trim()) {
       issues.push(
         "body is required; use Failure, Change, and Verification sections",
@@ -1010,11 +1004,35 @@ function checkCommitMessageCommand(options) {
       ).trim()
     : options.body?.trim() ?? "";
   const repositoryPolicy = options["repository-policy"]?.trim();
+  const repositoryOverrides = options["repository-overrides"]?.trim();
+  if (repositoryOverrides && !repositoryPolicy) {
+    throw new CliError(
+      "--repository-overrides requires --repository-policy <source>.",
+      2,
+    );
+  }
+  const overriddenFields = new Set();
+  if (repositoryOverrides) {
+    for (const field of repositoryOverrides.split(",")) {
+      const normalized = field.trim().toLowerCase();
+      if (normalized === "all") {
+        overriddenFields.add("subject");
+        overriddenFields.add("body");
+      } else if (["subject", "body"].includes(normalized)) {
+        overriddenFields.add(normalized);
+      } else {
+        throw new CliError(
+          "--repository-overrides must be subject, body, all, or a comma-separated combination.",
+          2,
+        );
+      }
+    }
+  }
   const productTerms = options["product-terms"]?.trim();
-  const useDefaultFormat = !repositoryPolicy;
   const issues = inspectCommitMessageWithPolicy(subject, body, {
     allowProductTerms: Boolean(productTerms),
-    useDefaultFormat,
+    useDefaultBodyFormat: !overriddenFields.has("body"),
+    useDefaultSubjectFormat: !overriddenFields.has("subject"),
   });
   return {
     status: issues.length === 0 ? "clean" : "issues",
@@ -1023,8 +1041,9 @@ function checkCommitMessageCommand(options) {
       ? {
           mode: "repository",
           source: repositoryPolicy,
+          overrides: [...overriddenFields].sort(),
           note:
-            "Repository guidance controls message format; prospective-only workflow safeguards still apply.",
+            "Repository guidance controls only the named fields; defaults and prospective-only safeguards remain active elsewhere.",
         }
       : {
           mode: "default",
@@ -1118,16 +1137,18 @@ Usage:
   codex-review-loop check-commit-message --subject <text>
                           [--body <text> | --body-file <path>]
                           [--repository-policy <source>]
+                          [--repository-overrides subject,body|all]
                           [--product-terms <justification>] [--json]
   codex-review-loop finish --reason clean|out-of-scope|stopped [--json]
 
 All repository commands accept --cwd <path>. Runtime state is stored below the
 target repository's Git directory. check-commit-message only validates a proposed
 message; it never inspects or changes Git history. Without a repository-policy
-override, new messages use Failure, Change, and Verification sections. No
-background process or heartbeat is used. --product-terms permits legitimate
-product-domain names without permitting workflow narration. Codex has no default
-round cap; other providers default to 15.`;
+field override, new messages use the default subject rules plus Failure, Change,
+and Verification sections. No background process or heartbeat is used.
+--product-terms permits legitimate product-domain names without permitting
+workflow narration. Codex has no default round cap; other providers default to
+15.`;
 }
 
 function printResult(result, json) {

@@ -205,7 +205,7 @@ Each `review` command invokes exactly one reviewer round. An invalid response ex
 
 Codex runs in native review mode and inherits `config.toml`, including the selected model and reasoning effort. Use `start --isolate-codex-config` only when you deliberately want to ignore that configuration. Codex has no default round cap; other providers stop at 15 rounds unless `--max-rounds` is supplied.
 
-The Codex adapter recognizes explicit native clean verdicts such as `No actionable defects found.` while rejecting verdicts mixed with findings or contradictory qualifications. Other providers remain bound to the exact clean sentinel.
+The Codex adapter recognizes structurally isolated native clean verdicts such as `No actionable defects found.` Other providers remain bound to the exact clean sentinel. For every provider, the clean verdict must be the sole non-empty output line.
 
 Use `--provider custom` with a directly executed JSON command:
 
@@ -235,7 +235,7 @@ codex-review-loop check-commit-message \
   --body-file /tmp/proposed-commit-body.txt
 ```
 
-When an explicit repository policy overrides the default format, identify it with `--repository-policy "<source>"`. The command then defers message formatting to that policy while retaining the prospective-only and no-workflow-narration safeguards. If the repository itself implements reviewer-provider behavior, `--product-terms "<justification>"` permits legitimate product names in that proposal without permitting workflow narration or AI co-authoring. The command checks only the supplied proposal; it never reads, grades, or mutates Git history. Once a commit exists, leave it unchanged and apply any improvement to the next proposal.
+When an explicit repository policy overrides a default field, identify it with `--repository-policy "<source>"` and `--repository-overrides subject`, `body`, or `all`. Defaults remain active for every field not named by the override, while prospective-only and no-workflow-narration safeguards always remain active. If the repository itself implements reviewer-provider behavior, `--product-terms "<justification>"` permits legitimate product names in that proposal without permitting attribution grammar or AI co-authoring. The command checks only the supplied proposal; it never reads, grades, or mutates Git history. Once a commit exists, leave it unchanged and apply any improvement to the next proposal.
 
 ## Development
 

@@ -9,7 +9,7 @@
    - unstaged changes;
    - untracked files.
 3. A repair never narrows the next review to the repair patch.
-4. Only a provider-valid explicit clean verdict is clean: the exact sentinel for general providers, or an uncontradicted native no-findings verdict for Codex.
+4. Only a provider-valid, structurally isolated clean verdict is clean: the exact sentinel for general providers, or an explicit native no-findings verdict for Codex.
 5. Reviewer text is relayed verbatim in one contiguous block before repair work, followed by a forward-looking one-line host disposition.
 6. Delivery follows a clean review of the exact delivered snapshot. Proposed repair commit messages are checked before those commits are created. Existing commit messages are never audited, and message quality is never part of the clean verdict.
 
@@ -41,7 +41,7 @@ Priorities are `P0` through `P3`. For providers other than native Codex, a clean
 NO_IN_SCOPE_FUNCTIONAL_FINDINGS
 ```
 
-Native Codex may instead return an explicit verdict such as `No actionable defects found.` The adapter accepts it only without finding syntax or contradictory language. Empty output, malformed output, a clean verdict mixed with findings, or general praise without an explicit verdict is invalid.
+Native Codex may instead return an explicit verdict such as `No actionable defects found.` The adapter accepts a clean result only when that verdict or the general sentinel is the sole non-empty output line. Empty output, malformed output, additional prose, a clean verdict mixed with findings, or general praise without an explicit verdict is invalid.
 
 ## Escalation
 

@@ -14,7 +14,7 @@ Use `doctor` to see which binaries are available. Provider choice is stored in t
 
 The Codex adapter inherits the user's configured model and reasoning effort so review depth matches direct Codex use. The native review sandbox remains read-only, and `--ephemeral` prevents a saved session. Use `start --isolate-codex-config` only when the run must ignore `config.toml`; authentication is still reused.
 
-Codex keeps its native review output. An explicit native verdict such as `No actionable defects found.` or `No in-scope functional findings.` is clean only when it contains no finding syntax or contradictory qualification. Other providers use the exact clean sentinel from the protocol.
+Codex keeps its native review output. An explicit native verdict such as `No actionable defects found.` or `No in-scope functional findings.` is clean only when it is the sole non-empty output line. Other providers use the exact clean sentinel under the same isolated-line rule.
 
 ## Custom provider
 

@@ -67,7 +67,7 @@ From the target repository:
      --body-file "<path-to-proposed-body>"
    ```
 
-   When an explicit repository policy conflicts with the default message format, add `--repository-policy "<source>"`; this keeps the prospective-only and no-workflow-narration safeguards while deferring the format to that policy. If the product itself exposes reviewer-provider behavior and its legitimate names trigger the broad attribution check, add `--product-terms "<why these names describe the product>"`; this never permits workflow narration or AI co-authoring. Only create the commit when the proposal is clean. Do not stage unrelated user changes. Once a commit exists, do not run the check against it—apply any improvement to the next proposal instead.
+   When an explicit repository policy conflicts with a default field, add `--repository-policy "<source>"` and `--repository-overrides subject`, `body`, or `all`. Defaults remain active for fields not named by the override, and prospective-only/no-workflow-narration safeguards always remain active. If the product itself exposes reviewer-provider behavior and its legitimate names trigger the broad attribution check, add `--product-terms "<why these names describe the product>"`; this never permits attribution grammar or AI co-authoring. Only create the commit when the proposal is clean. Do not stage unrelated user changes. Once a commit exists, do not run the check against it—apply any improvement to the next proposal instead.
 
 7. Re-run `review` after all repairs, verification, and any authorized commit. Each command invokes exactly one reviewer round over the full current scope, not only the latest patch. Continue until the engine returns `clean`.
 

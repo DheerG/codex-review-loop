@@ -29,7 +29,7 @@ Before proposing the next commit, resolve its message policy in this order:
 2. explicit repository guidance such as `AGENTS.md`, `CONTRIBUTING.md`, a commit template, or commit-lint configuration;
 3. the default product-narrative format below.
 
-Apply repository guidance only where it speaks. For example, a Conventional Commits subject rule can coexist with the default body. If repository guidance explicitly conflicts with the default body or limits, follow the repository and pass `--repository-policy "<source>"` to the prospective check. Existing commit messages are legacy examples, not an authoritative policy and never a compliance target.
+Apply repository guidance only where it speaks. For example, a Conventional Commits subject rule can coexist with the default body. If repository guidance explicitly conflicts with a default field, follow the repository and pass `--repository-policy "<source>"` plus `--repository-overrides subject`, `body`, or `all` to the prospective check. Defaults remain active for every field not named by the override. Existing commit messages are legacy examples, not an authoritative policy and never a compliance target.
 
 Do not scan history merely to grade it. If an already-visible message differs from the effective policy, the host may give one non-blocking notice that existing messages remain unchanged and the policy applies only to new proposals. Never turn that observation into a finding, failed check, or request to rewrite history.
 
@@ -65,7 +65,8 @@ When an explicit repository rule overrides the default format, identify its sour
 node <skill-dir>/scripts/review-loop.mjs check-commit-message \
   --subject "fix(retries): preserve terminal provider errors" \
   --body-file "<path-to-proposed-body>" \
-  --repository-policy "CONTRIBUTING.md"
+  --repository-policy "CONTRIBUTING.md" \
+  --repository-overrides subject
 ```
 
 The override does not waive the prospective-only boundary or permit reviewer/AI workflow narration. The command checks only the proposal supplied on its command line. It never reads, grades, amends, or otherwise changes Git history. If it reports issues, revise the proposal before committing. After the commit, run the next independent review. Never run a history-cleanup gate after a clean review, and never make existing message quality a condition of `finish --reason clean`.
