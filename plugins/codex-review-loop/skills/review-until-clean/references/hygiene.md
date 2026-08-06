@@ -1,4 +1,4 @@
-# Code and Git hygiene
+# Review-fix hygiene
 
 The workflow should disappear into the quality of the result. Product artifacts describe the product change, not the review machinery that found it.
 
@@ -14,18 +14,60 @@ The workflow should disappear into the quality of the result. Product artifacts 
 
 Only commit or push when the user or containing workflow already authorized it.
 
+- Treat existing branch history as immutable input. Never audit it for message quality or amend, rebase, squash, or recreate commits solely to satisfy this policy.
+- Commit-message guidance is prospective only. Check a proposed message before its commit is created. Once the commit exists, leave it unchanged and improve the next message instead.
+- When review repairs need a commit, create a new commit before the next review so the resulting commit is part of the reviewed snapshot.
 - Group commits by product behavior or root cause, never by reviewer round.
-- Use an imperative subject of at most 72 characters with no trailing period.
-- Avoid vague subjects such as `Fix issues` or `Cleanup`.
 - Never use subjects such as `Address review feedback`, `Codex fixes`, or `Review round 3`.
-- Use a body only when the technical reason, compatibility constraint, or behavioral tradeoff is not clear from the diff. Keep body lines near 100 characters.
 - Do not add AI/reviewer attribution or AI co-author trailers.
 
-The `hygiene` command runs `git diff --check`, examines added lines for workflow attribution, and checks commit messages in the delivery scope. Attribution matches are candidates because a project may legitimately implement AI review features. In that exceptional product-domain case, rerun:
+### Resolve the prospective policy
 
-```sh
-node <skill-dir>/scripts/review-loop.mjs hygiene \
-  --justify-product-terms "<why these terms are part of the product>"
+Before proposing the next commit, resolve its message policy in this order:
+
+1. explicit instructions from the user;
+2. explicit repository guidance such as `AGENTS.md`, `CONTRIBUTING.md`, a commit template, or commit-lint configuration;
+3. the default product-narrative format below.
+
+Apply repository guidance only where it speaks. For example, a Conventional Commits subject rule can coexist with the default body. If repository guidance explicitly conflicts with the default body or limits, follow the repository and pass `--repository-policy "<source>"` to the prospective check. Existing commit messages are legacy examples, not an authoritative policy and never a compliance target.
+
+Do not scan history merely to grade it. If an already-visible message differs from the effective policy, the host may give one non-blocking notice that existing messages remain unchanged and the policy applies only to new proposals. Never turn that observation into a finding, failed check, or request to rewrite history.
+
+When no stronger rule applies, use an imperative subject of at most 72 characters with no trailing period. Avoid vague subjects such as `Fix issues` or `Cleanup`. Write the body in this format:
+
+```text
+Failure:
+<triggering state or input, incorrect behavior, and consequence>
+
+Change:
+<resulting behavior and the seams or sibling sites covered>
+
+Rationale:
+<why this implementation shape was chosen, when non-obvious>
+
+Verification:
+- <exact test or command actually run>
 ```
 
-The non-empty justification is tied to the exact Git snapshot. It does not waive whitespace errors, vague messages, overlong subjects, or reviewer-round commits.
+`Rationale:` is optional. `Failure:`, `Change:`, and `Verification:` are required by the default. For several related defects, use one scenario-and-resolution bullet per behavior. Put unrelated root causes in separate commits. Keep the tone factual rather than defensive and body lines to at most 100 characters. Do not copy priority labels or reviewer prose into history; translate useful information into product failure, behavior, rationale, and evidence.
+
+Check the proposed message before creating the repair commit:
+
+```sh
+node <skill-dir>/scripts/review-loop.mjs check-commit-message \
+  --subject "Preserve errors across retry exhaustion" \
+  --body-file "<path-to-proposed-body>"
+```
+
+When an explicit repository rule overrides the default format, identify its source:
+
+```sh
+node <skill-dir>/scripts/review-loop.mjs check-commit-message \
+  --subject "fix(retries): preserve terminal provider errors" \
+  --body-file "<path-to-proposed-body>" \
+  --repository-policy "CONTRIBUTING.md"
+```
+
+The override does not waive the prospective-only boundary or permit reviewer/AI workflow narration. The command checks only the proposal supplied on its command line. It never reads, grades, amends, or otherwise changes Git history. If it reports issues, revise the proposal before committing. After the commit, run the next independent review. Never run a history-cleanup gate after a clean review, and never make existing message quality a condition of `finish --reason clean`.
+
+A repository that genuinely implements reviewer-provider behavior may need product names in its proposed message or exact verification commands. In that narrow case, add `--product-terms "<why these names describe the product>"`. The justification waives only the broad product-term match for that proposal; workflow narration, defensive language, and AI co-author trailers remain prohibited. It never applies to existing history.

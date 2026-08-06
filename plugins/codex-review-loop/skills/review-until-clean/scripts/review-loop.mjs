@@ -21,9 +21,10 @@ import { fileURLToPath } from "node:url";
 
 const PROVIDERS = ["auto", "codex", "gemini", "claude", "opencode", "custom"];
 const CLEAN_SENTINEL = "NO_IN_SCOPE_FUNCTIONAL_FINDINGS";
-const DEFAULT_MAX_ROUNDS = 20;
+const DEFAULT_FALLBACK_MAX_ROUNDS = 15;
 const DEFAULT_TIMEOUT_MS = 1_200_000;
 const MAX_CAPTURE_BYTES = 64 * 1024 * 1024;
+const DEFAULT_COMMIT_SECTIONS = ["Failure", "Change", "Verification"];
 const SKILL_SCRIPT = fileURLToPath(import.meta.url);
 
 class CliError extends Error {
@@ -288,8 +289,14 @@ function chooseProvider(requested, env = process.env) {
   return selected;
 }
 
-function reviewPrompt(state, files) {
+export function reviewPrompt(state, files) {
   const fileList = files.map((file) => `- ${file}`).join("\n");
+  const cleanInstruction =
+    state.provider === "codex"
+      ? `Review summary: <brief summary>
+No in-scope functional findings.`
+      : `Review summary: <brief summary>
+${CLEAN_SENTINEL}`;
   return `You are the independent final reviewer. Work read-only: do not edit files, stage changes, commit, or invoke another writing agent.
 
 Approved outcome:
@@ -309,6 +316,8 @@ ${fileList}
 
 Inspect the repository and diff directly. Be exhaustive rather than stopping at the first issue. Report only actionable functional defects introduced by this scope: correctness, security, reliability, data integrity, compatibility, or material performance problems. Do not report style preferences, speculative redesigns, or pre-existing defects. A finding must explain a concrete failure mode and cite the smallest useful location.
 
+Commit subjects and bodies may provide context about intended behavior, but their claims are not proof. Verify them against the complete diff, tests, and reachable sibling sites. Commit-message quality is outside this functional review: do not report existing message quality as a finding or recommend amending, rebasing, squashing, recreating, or otherwise rewriting history.
+
 For findings, return:
 Review summary: <brief summary>
 Full review comments:
@@ -316,10 +325,9 @@ Full review comments:
   <why this fails and when>
 
 If and only if there are no in-scope functional findings, return:
-Review summary: <brief summary>
-${CLEAN_SENTINEL}
+${cleanInstruction}
 
-Do not emit the clean sentinel with any finding.`;
+Do not state that the review is clean when reporting any finding.`;
 }
 
 function parseCustomCommand(env) {
@@ -341,12 +349,22 @@ function parseCustomCommand(env) {
   }
 }
 
-function providerInvocation(provider, prompt, env) {
-  switch (provider) {
+export function codexReviewArgs(isolateUserConfig = false) {
+  return [
+    "exec",
+    "review",
+    "--ephemeral",
+    ...(isolateUserConfig ? ["--ignore-user-config"] : []),
+    "-",
+  ];
+}
+
+function providerInvocation(state, prompt, env) {
+  switch (state.provider) {
     case "codex":
       return {
         command: "codex",
-        args: ["exec", "review", "--ephemeral", "--ignore-user-config", "-"],
+        args: codexReviewArgs(Boolean(state.isolateCodexConfig)),
         input: prompt,
       };
     case "gemini":
@@ -378,7 +396,7 @@ function providerInvocation(provider, prompt, env) {
       return { command, args, input: prompt };
     }
     default:
-      throw new CliError(`Unsupported provider: ${provider}`, 3);
+      throw new CliError(`Unsupported provider: ${state.provider}`, 3);
   }
 }
 
@@ -475,12 +493,34 @@ function providerErrorKind(result) {
   return "failed";
 }
 
-export function parseReview(output) {
+function codexExplicitClean(text) {
+  const patterns = [
+    /\bno\s+(?:(?:in-scope|actionable|functional|material)\s+){0,3}(?:findings?|defects?|issues?|bugs?)(?:\s+(?:were\s+)?(?:found|identified|detected))?\b/iu,
+    /\b(?:found|identified|detected)\s+no\s+(?:(?:in-scope|actionable|functional|material)\s+){0,3}(?:findings?|defects?|issues?|bugs?)\b/iu,
+    /\b(?:did\s+not|didn't)\s+(?:find|identify|detect)\s+(?:any\s+)?(?:(?:in-scope|actionable|functional|material)\s+){0,3}(?:findings?|defects?|issues?|bugs?)\b/iu,
+  ];
+  const match = patterns.map((pattern) => text.match(pattern)).find(Boolean);
+  if (!match) return false;
+  const start = match.index ?? 0;
+  const remainder = `${text.slice(0, start)} ${text.slice(
+    start + match[0].length,
+  )}`;
+  return !hasContradictoryQualification(remainder);
+}
+
+function hasContradictoryQualification(text) {
+  return /\b(?:but|however|except|although|though|yet|fails?|breaks?|broken|incorrect)\b|\b(?:a|an|one|remaining|potential|possible|the)\s+(?:concerns?|problems?|risks?|failures?|bugs?)\b|\bthere(?:'s| is)\s+(?:a\s+)?(?:concerns?|problems?|risks?|failures?|bugs?)\b/iu.test(
+    text,
+  );
+}
+
+export function parseReview(output, provider = "custom") {
   const text = output.trim();
-  const hasClean = text
+  const hasSentinel = text
     .split(/\r?\n/u)
     .some((line) => line.trim() === CLEAN_SENTINEL);
   const heading = /^Full review comments:\s*$/imu.test(text);
+  const prioritySyntax = /^\s*-\s+\[P[0-3]\]/imu.test(text);
   const findings = [];
   const pattern =
     /^\s*-\s+\[(P[0-3])\]\s+(.+?)\s+(?:—|--|-)\s+(.+?):(\d+)(?:-(\d+))?\s*$/gmu;
@@ -491,22 +531,43 @@ export function parseReview(output) {
       file: match[3].trim(),
       line: Number(match[4]),
       endLine: match[5] ? Number(match[5]) : undefined,
-      key: `${match[2].trim().toLowerCase()}|${match[3].trim().toLowerCase()}`,
+      key: `${match[2].trim().toLowerCase()}|${match[3]
+        .trim()
+        .toLowerCase()}:${Number(match[4])}`,
     });
   }
+  const hasNativeCodexClean =
+    provider === "codex" &&
+    !heading &&
+    !prioritySyntax &&
+    codexExplicitClean(text);
+  const sentinelRemainder = text
+    .split(/\r?\n/u)
+    .filter((line) => line.trim() !== CLEAN_SENTINEL)
+    .join("\n");
+  const hasValidSentinel =
+    hasSentinel && !hasContradictoryQualification(sentinelRemainder);
 
-  if (hasClean && findings.length === 0 && !heading) {
+  if (
+    (hasValidSentinel || hasNativeCodexClean) &&
+    findings.length === 0 &&
+    !heading &&
+    !prioritySyntax
+  ) {
     return { status: "clean", findings: [] };
   }
-  if (!hasClean && heading && findings.length > 0) {
+  if (!hasSentinel && !hasNativeCodexClean && heading && findings.length > 0) {
     return { status: "findings", findings };
   }
   return {
     status: "invalid",
     findings,
-    reason: hasClean
-      ? "The clean sentinel was mixed with finding syntax or a findings heading."
-      : "Expected a findings heading with structured findings or the exact clean sentinel.",
+    reason:
+      hasSentinel || hasNativeCodexClean
+        ? "The clean verdict was mixed with finding syntax or a findings heading."
+        : provider === "codex"
+          ? "Expected structured findings or an explicit Codex no-findings verdict."
+          : "Expected a findings heading with structured findings or the exact clean sentinel.",
   };
 }
 
@@ -524,6 +585,7 @@ function reviewSummary(state) {
     outcome: state.outcome,
     round: state.round,
     maxRounds: state.maxRounds,
+    isolateCodexConfig: Boolean(state.isolateCodexConfig),
     lastReview: state.lastReview,
     startedAt: state.startedAt,
     updatedAt: state.updatedAt,
@@ -533,7 +595,7 @@ function reviewSummary(state) {
 function parseArguments(argv) {
   const options = {};
   const positional = [];
-  const booleans = new Set(["json", "help"]);
+  const booleans = new Set(["json", "help", "isolate-codex-config"]);
   for (let index = 0; index < argv.length; index += 1) {
     const item = argv[index];
     if (!item.startsWith("--")) {
@@ -577,6 +639,13 @@ function integerOption(value, fallback, name, minimum, maximum) {
   return parsed;
 }
 
+export function reviewRoundLimit(provider, configured) {
+  if (configured === undefined) {
+    return provider === "codex" ? null : DEFAULT_FALLBACK_MAX_ROUNDS;
+  }
+  return integerOption(configured, null, "max-rounds", 1, 100);
+}
+
 async function startCommand(repo, options, env) {
   if (existsSync(repo.activeFile)) {
     const active = loadActive(repo);
@@ -613,17 +682,11 @@ async function startCommand(repo, options, env) {
     requestedProvider,
     provider,
     round: 0,
-    maxRounds: integerOption(
-      options["max-rounds"],
-      DEFAULT_MAX_ROUNDS,
-      "max-rounds",
-      1,
-      100,
-    ),
+    maxRounds: reviewRoundLimit(provider, options["max-rounds"]),
+    isolateCodexConfig: Boolean(options["isolate-codex-config"]),
     initialHead: git(repo.root, ["rev-parse", "HEAD"]).stdout.trim(),
-    findingCounts: {},
+    findingHistory: {},
     lastReview: null,
-    hygieneJustification: null,
     startedAt: now,
     updatedAt: now,
   };
@@ -644,7 +707,7 @@ async function reviewCommand(repo, env) {
       5,
     );
   }
-  if (state.round >= state.maxRounds) {
+  if (state.maxRounds !== null && state.round >= state.maxRounds) {
     state.phase = "round_limit";
     saveActive(repo, state);
     return {
@@ -660,7 +723,7 @@ async function reviewCommand(repo, env) {
   }
   const before = snapshot(repo.root, state.base);
   const prompt = reviewPrompt(state, files);
-  const invocation = providerInvocation(state.provider, prompt, env);
+  const invocation = providerInvocation(state, prompt, env);
   const timeoutMs = integerOption(
     env.CODEX_REVIEW_LOOP_TIMEOUT_MS,
     DEFAULT_TIMEOUT_MS,
@@ -757,19 +820,31 @@ async function reviewCommand(repo, env) {
     };
   }
 
-  const parsed = parseReview(reviewerOutput);
+  const parsed = parseReview(reviewerOutput, state.provider);
+  state.findingHistory ??= {};
+  const recurring = [];
   if (parsed.status === "findings") {
-    for (const finding of parsed.findings) {
-      state.findingCounts[finding.key] =
-        (state.findingCounts[finding.key] ?? 0) + 1;
+    const uniqueFindings = new Map(
+      parsed.findings.map((finding) => [finding.key, finding]),
+    );
+    for (const finding of uniqueFindings.values()) {
+      const history = state.findingHistory[finding.key] ?? {
+        appearances: 0,
+        fixAttempts: 0,
+        lastSnapshot: null,
+      };
+      if (history.lastSnapshot && history.lastSnapshot !== before) {
+        history.fixAttempts += 1;
+      }
+      history.appearances += 1;
+      history.lastSnapshot = before;
+      history.lastSeenRound = state.round;
+      state.findingHistory[finding.key] = history;
+      if (history.fixAttempts >= 2) {
+        recurring.push({ ...finding, fixAttempts: history.fixAttempts });
+      }
     }
   }
-  const recurring =
-    parsed.status === "findings"
-      ? parsed.findings.filter(
-          (finding) => state.findingCounts[finding.key] >= 3,
-        )
-      : [];
   const status = recurring.length > 0 ? "oscillation" : parsed.status;
   state.phase =
     status === "clean"
@@ -813,15 +888,32 @@ function hasAttribution(text) {
 }
 
 export function inspectCommitMessage(subject, body = "") {
+  return inspectCommitMessageWithPolicy(subject, body, {
+    allowProductTerms: false,
+    useDefaultFormat: true,
+  });
+}
+
+function commitSection(body, name) {
+  const lines = body.split(/\r?\n/u);
+  const heading = `${name}:`;
+  const start = lines.findIndex((line) => line.trim() === heading);
+  if (start < 0) return null;
+  const end = lines.findIndex(
+    (line, index) =>
+      index > start &&
+      /^(?:Failure|Change|Rationale|Verification):\s*$/u.test(line.trim()),
+  );
+  return lines
+    .slice(start + 1, end < 0 ? undefined : end)
+    .join("\n")
+    .trim();
+}
+
+function inspectCommitMessageWithPolicy(subject, body, options) {
   const issues = [];
-  if (subject.length > 72) {
-    issues.push(`subject is ${subject.length} characters; maximum is 72`);
-  }
-  if (subject.endsWith(".")) {
-    issues.push("subject has a trailing period");
-  }
-  if (/^(?:fix(?:es|ed)? issues?|cleanup|updates?|changes?)$/iu.test(subject.trim())) {
-    issues.push("subject is vague");
+  if (!subject.trim()) {
+    issues.push("subject is empty");
   }
   if (
     /\b(?:address|apply|fix)(?:es|ed|ing)?\s+(?:the\s+)?review(?:er)?\s+(?:feedback|findings?|comments?)\b/iu.test(
@@ -833,8 +925,20 @@ export function inspectCommitMessage(subject, body = "") {
   ) {
     issues.push("subject describes the review workflow instead of product behavior");
   }
-  if (hasAttribution(`${subject}\n${body}`)) {
+  if (!options.allowProductTerms && hasAttribution(`${subject}\n${body}`)) {
     issues.push("message contains reviewer or AI-workflow attribution");
+  }
+  if (
+    /\b(?:to satisfy|in response to|as requested by|per|following)\s+(?:the\s+)?(?:review|reviewer|feedback|findings?|comments?)\b/iu.test(
+      body,
+    ) ||
+    /\b(?:review|reviewer|feedback|findings?|comments?)\s+(?:asked|requested|required|suggested|said)\b/iu.test(
+      body,
+    )
+  ) {
+    issues.push(
+      "message narrates or defends the review process instead of the product change",
+    );
   }
   if (
     /^co-authored-by:.*(?:codex|claude|gemini|chatgpt|openai|anthropic|\bai\b)/imu.test(
@@ -843,167 +947,89 @@ export function inspectCommitMessage(subject, body = "") {
   ) {
     issues.push("message contains an AI co-author trailer");
   }
-  const longLine = body
-    .split(/\r?\n/u)
-    .findIndex((line) => line.length > 100);
-  if (longLine >= 0) {
-    issues.push(`body line ${longLine + 1} exceeds 100 characters`);
+  if (options.useDefaultFormat) {
+    if (subject.length > 72) {
+      issues.push(`subject is ${subject.length} characters; maximum is 72`);
+    }
+    if (subject.endsWith(".")) {
+      issues.push("subject has a trailing period");
+    }
+    if (
+      /^(?:fix(?:es|ed)? issues?|cleanup|updates?|changes?)$/iu.test(
+        subject.trim(),
+      )
+    ) {
+      issues.push("subject is vague");
+    }
+    if (!body.trim()) {
+      issues.push(
+        "body is required; use Failure, Change, and Verification sections",
+      );
+    } else {
+      for (const section of DEFAULT_COMMIT_SECTIONS) {
+        const content = commitSection(body, section);
+        if (content === null) {
+          issues.push(`body is missing the ${section}: section`);
+        } else if (!content) {
+          issues.push(`${section}: section is empty`);
+        }
+      }
+    }
+    const longLine = body
+      .split(/\r?\n/u)
+      .findIndex((line) => line.length > 100);
+    if (longLine >= 0) {
+      issues.push(`body line ${longLine + 1} exceeds 100 characters`);
+    }
   }
   return issues;
 }
 
-function addedLinesFromDiff(diff, source) {
-  const matches = [];
-  let file = source;
-  let newLine = 0;
-  for (const line of diff.split(/\r?\n/u)) {
-    if (line.startsWith("+++ b/")) {
-      file = line.slice(6);
-      continue;
-    }
-    const hunk = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/u);
-    if (hunk) {
-      newLine = Number(hunk[1]);
-      continue;
-    }
-    if (line.startsWith("+") && !line.startsWith("+++")) {
-      if (hasAttribution(line.slice(1))) {
-        matches.push({ file, line: newLine || null, text: line.slice(1).trim() });
-      }
-      newLine += 1;
-    } else if (!line.startsWith("-") && !line.startsWith("\\")) {
-      if (newLine) newLine += 1;
-    }
+function checkCommitMessageCommand(options) {
+  if (options.body && options["body-file"]) {
+    throw new CliError("Use only one of --body and --body-file.", 2);
   }
-  return matches;
-}
-
-function untrackedAttribution(root) {
-  const matches = [];
-  const files = splitNull(
-    git(root, ["ls-files", "--others", "--exclude-standard", "-z"]).stdout,
-  );
-  for (const file of files) {
-    const absolute = path.join(root, file);
-    try {
-      const stat = lstatSync(absolute);
-      if (!stat.isFile() || stat.size > 5 * 1024 * 1024) continue;
-      const content = readFileSync(absolute, "utf8");
-      if (content.includes("\0")) continue;
-      content.split(/\r?\n/u).forEach((line, index) => {
-        if (hasAttribution(line)) {
-          matches.push({ file, line: index + 1, text: line.trim() });
-        }
-      });
-    } catch {
-      // Unreadable untracked files are still in the reviewer scope.
-    }
-  }
-  return matches;
-}
-
-function commitMessages(root, base) {
-  const output = git(root, [
-    "log",
-    "--format=%H%x00%s%x00%b%x00",
-    `${base}..HEAD`,
-    "--",
-  ]).stdout;
-  const fields = output.split("\0");
-  const messages = [];
-  for (let index = 0; index + 2 < fields.length; index += 3) {
-    const hash = fields[index].trim();
-    if (!hash) continue;
-    messages.push({
-      hash,
-      subject: fields[index + 1] ?? "",
-      body: fields[index + 2] ?? "",
-    });
-  }
-  return messages;
-}
-
-function hygieneResult(repo, state) {
-  const hardIssues = [];
-  const diffChecks = [
-    ["diff", "--check", `${state.base}...HEAD`, "--"],
-    ["diff", "--cached", "--check", "--"],
-    ["diff", "--check", "--"],
-  ];
-  for (const args of diffChecks) {
-    const result = git(repo.root, args, { allowFailure: true });
-    if (result.status !== 0) {
-      hardIssues.push({
-        kind: "whitespace",
-        detail: (result.stdout || result.stderr).trim(),
-      });
-    }
-  }
-
-  for (const commit of commitMessages(repo.root, state.base)) {
-    for (const detail of inspectCommitMessage(commit.subject, commit.body)) {
-      hardIssues.push({
-        kind: "commit_message",
-        commit: commit.hash,
-        subject: commit.subject,
-        detail,
-      });
-    }
-  }
-
-  const attribution = [];
-  const diffs = [
-    git(repo.root, ["diff", "--unified=0", `${state.base}...HEAD`, "--"]).stdout,
-    git(repo.root, ["diff", "--cached", "--unified=0", "--"]).stdout,
-    git(repo.root, ["diff", "--unified=0", "--"]).stdout,
-  ];
-  for (const diff of diffs) {
-    attribution.push(...addedLinesFromDiff(diff, "diff"));
-  }
-  attribution.push(...untrackedAttribution(repo.root));
-
-  const deduplicated = [
-    ...new Map(
-      attribution.map((item) => [
-        `${item.file}:${item.line}:${item.text}`,
-        { kind: "workflow_attribution", ...item },
-      ]),
-    ).values(),
-  ];
-  const currentSnapshot = snapshot(repo.root, state.base);
-  const waived =
-    deduplicated.length > 0 &&
-    state.hygieneJustification?.snapshot === currentSnapshot;
+  const subject = options.subject?.trim() ?? "";
+  const body = options["body-file"]
+    ? readFileSync(
+        path.resolve(options.cwd ?? process.cwd(), options["body-file"]),
+        "utf8",
+      ).trim()
+    : options.body?.trim() ?? "";
+  const repositoryPolicy = options["repository-policy"]?.trim();
+  const productTerms = options["product-terms"]?.trim();
+  const useDefaultFormat = !repositoryPolicy;
+  const issues = inspectCommitMessageWithPolicy(subject, body, {
+    allowProductTerms: Boolean(productTerms),
+    useDefaultFormat,
+  });
   return {
-    ok: hardIssues.length === 0 && (deduplicated.length === 0 || waived),
-    snapshot: currentSnapshot,
-    hardIssues,
-    attributionCandidates: deduplicated,
-    attributionWaived: waived,
-    justification: waived ? state.hygieneJustification.justification : undefined,
+    status: issues.length === 0 ? "clean" : "issues",
+    subject,
+    policy: repositoryPolicy
+      ? {
+          mode: "repository",
+          source: repositoryPolicy,
+          note:
+            "Repository guidance controls message format; prospective-only workflow safeguards still apply.",
+        }
+      : {
+          mode: "default",
+          requiredSections: DEFAULT_COMMIT_SECTIONS,
+          optionalSections: ["Rationale"],
+        },
+    historyPolicy:
+      "prospective-only; existing commits are never inspected or rewritten",
+    ...(productTerms
+      ? {
+          productTerms: {
+            justification: productTerms,
+            note: "Product-domain terms are allowed; workflow narration and AI co-authoring remain prohibited.",
+          },
+        }
+      : {}),
+    issues,
   };
-}
-
-function hygieneCommand(repo, options) {
-  const state = loadActive(repo);
-  let result = hygieneResult(repo, state);
-  const justification = options["justify-product-terms"]?.trim();
-  if (justification) {
-    if (result.attributionCandidates.length === 0) {
-      throw new CliError(
-        "No product-term attribution candidates need justification.",
-        2,
-      );
-    }
-    state.hygieneJustification = {
-      justification,
-      snapshot: result.snapshot,
-      createdAt: new Date().toISOString(),
-    };
-    saveActive(repo, state);
-    result = hygieneResult(repo, state);
-  }
-  return { status: result.ok ? "clean" : "issues", ...result };
 }
 
 function archiveRun(repo, state, reason) {
@@ -1042,14 +1068,6 @@ function finishCommand(repo, options) {
         2,
       );
     }
-    const hygiene = hygieneResult(repo, state);
-    if (!hygiene.ok) {
-      throw new CliError(
-        "Hygiene checks failed. Run `hygiene` for details before finishing.",
-        2,
-        hygiene,
-      );
-    }
   }
   const archive = archiveRun(repo, state, reason);
   return {
@@ -1080,14 +1098,23 @@ function help() {
 Usage:
   codex-review-loop doctor [--json]
   codex-review-loop start --outcome <text> [--base <ref>] [--provider <name>]
-                          [--max-rounds <1-100>] [--json]
+                          [--max-rounds <1-100>] [--isolate-codex-config]
+                          [--json]
   codex-review-loop status [--json]
   codex-review-loop review [--json]
-  codex-review-loop hygiene [--justify-product-terms <reason>] [--json]
+  codex-review-loop check-commit-message --subject <text>
+                          [--body <text> | --body-file <path>]
+                          [--repository-policy <source>]
+                          [--product-terms <justification>] [--json]
   codex-review-loop finish --reason clean|out-of-scope|stopped [--json]
 
 All repository commands accept --cwd <path>. Runtime state is stored below the
-target repository's Git directory. No background process or heartbeat is used.`;
+target repository's Git directory. check-commit-message only validates a proposed
+message; it never inspects or changes Git history. Without a repository-policy
+override, new messages use Failure, Change, and Verification sections. No
+background process or heartbeat is used. --product-terms permits legitimate
+product-domain names without permitting workflow narration. Codex has no default
+round cap; other providers default to 15.`;
 }
 
 function printResult(result, json) {
@@ -1122,6 +1149,8 @@ export async function main(argv, runtime = {}) {
     let result;
     if (command === "doctor") {
       result = doctorCommand(env);
+    } else if (command === "check-commit-message") {
+      result = checkCommitMessageCommand(options);
     } else {
       const repo = repository(options.cwd ?? process.cwd());
       switch (command) {
@@ -1133,9 +1162,6 @@ export async function main(argv, runtime = {}) {
           break;
         case "review":
           result = await reviewCommand(repo, env);
-          break;
-        case "hygiene":
-          result = hygieneCommand(repo, options);
           break;
         case "finish":
           result = finishCommand(repo, options);

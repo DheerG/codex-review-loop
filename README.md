@@ -10,10 +10,12 @@ Codex is the preferred reviewer. Gemini CLI, Claude Code, OpenCode, and a custom
 - Repairs never narrow the next round to only the latest patch.
 - The reviewer cannot write; the host agent owns edits, verification, and triage.
 - Empty or malformed reviewer output is not clean.
+- Native Codex review inherits the user's configured model and reasoning effort.
+- Codex-native explicit clean verdicts are accepted without weakening other providers' output contracts.
 - A clean result is bound to a content snapshot. Editing afterward invalidates it.
 - Runtime state and raw rounds live below the target repository's Git directory.
 - There is no Stop hook, daemon, cron job, scheduled task, timer, or heartbeat.
-- A hygiene gate catches whitespace, weak or workflow-narrating commit messages, AI co-author trailers, and attribution added to product artifacts.
+- A prospective commit-message check keeps review-fix commits product-focused without rewriting existing history.
 
 ## Requirements
 
@@ -159,7 +161,7 @@ The planner does not pretend to execute the loop. The execution step runs after 
 
 ## Direct command
 
-The agent-facing skill drives repairs. The companion command provides the durable review state, independent provider call, response validation, and hygiene enforcement:
+The agent-facing skill drives repairs. The companion command provides durable review state, independent provider calls, response validation, and a prospective check for review-fix commit messages:
 
 ```sh
 npm link
@@ -172,7 +174,12 @@ codex-review-loop doctor
 codex-review-loop start --outcome "Preserve the public API while fixing retries"
 codex-review-loop review
 codex-review-loop status
-codex-review-loop hygiene
+# After a finding is repaired, and only when a commit is already authorized:
+codex-review-loop check-commit-message \
+  --subject "Preserve errors across retry exhaustion" \
+  --body-file /tmp/proposed-commit-body.txt
+# Create the repair commit, then review the resulting snapshot:
+codex-review-loop review
 codex-review-loop finish --reason clean
 ```
 
@@ -183,7 +190,9 @@ node plugins/codex-review-loop/skills/review-until-clean/scripts/review-loop.mjs
   start --outcome "Preserve the public API while fixing retries"
 ```
 
-`finish --reason clean` rejects an unclean last result, a changed post-review snapshot, and failed hygiene.
+`finish --reason clean` rejects an unclean last result or a changed post-review snapshot. It never scans or rewrites commit history after a clean review.
+
+Each `review` command invokes exactly one reviewer round. An invalid response exits nonzero because it is not clean; inspect the returned status before retrying. Do not attach a shell `||` fallback to `review`, because that can mistake an invalid result for a failed invocation and consume an unintended second round.
 
 ## Providers
 
@@ -194,6 +203,10 @@ node plugins/codex-review-loop/skills/review-until-clean/scripts/review-loop.mjs
 3. Claude Code
 4. OpenCode
 
+Codex runs in native review mode and inherits `config.toml`, including the selected model and reasoning effort. Use `start --isolate-codex-config` only when you deliberately want to ignore that configuration. Codex has no default round cap; other providers stop at 15 rounds unless `--max-rounds` is supplied.
+
+The Codex adapter recognizes explicit native clean verdicts such as `No actionable defects found.` while rejecting verdicts mixed with findings or contradictory qualifications. Other providers remain bound to the exact clean sentinel.
+
 Use `--provider custom` with a directly executed JSON command:
 
 ```sh
@@ -203,18 +216,26 @@ codex-review-loop start --provider custom --outcome "..."
 
 The review prompt is sent to standard input. Custom provider sandboxing is the operator's responsibility.
 
-## Hygiene policy
+## Review-fix commit policy
 
-Fixes should read as intentional product work. Do not add “found by Codex,” “AI suggested,” or “review round” narration to code comments, docs, strings, tests, commits, or trailers. Commit subjects describe product behavior and commits are grouped by behavior or root cause, not reviewer round.
+Fixes should read as intentional product work. Do not add “found by Codex,” “AI suggested,” or “review round” narration to code comments, docs, strings, tests, commits, or trailers.
 
-Projects that genuinely implement reviewer-provider behavior can justify product-domain terms for the exact snapshot:
+- Existing branch history is immutable input. The loop never audits its message quality or requires an amend, rebase, squash, or commit recreation to pass a post-review gate.
+- If a repair commit is already authorized, create it before the next review and group it by product behavior or root cause, not reviewer round.
+- Resolve message guidance prospectively: explicit user instructions first, then explicit repository rules, then the plugin default. Repository rules apply where they speak; the default fills unspecified fields. Existing messages are examples, not a policy or compliance target.
+- By default, use an imperative subject of at most 72 characters with no trailing period. Use `Failure:`, `Change:`, and `Verification:` body sections, plus `Rationale:` when the implementation choice is non-obvious.
+- Preserve the triggering scenario, consequence, resulting behavior, sibling coverage, and exact checks run. Do not defend the change or discuss the review process.
+- Review the repository again after creating the commit, because the commit changes the bound Git snapshot.
+
+Validate the proposed message before committing:
 
 ```sh
-codex-review-loop hygiene \
-  --justify-product-terms "The product exposes reviewer-provider configuration"
+codex-review-loop check-commit-message \
+  --subject "Preserve errors across retry exhaustion" \
+  --body-file /tmp/proposed-commit-body.txt
 ```
 
-The exception never waives whitespace or commit-message quality failures.
+When an explicit repository policy overrides the default format, identify it with `--repository-policy "<source>"`. The command then defers message formatting to that policy while retaining the prospective-only and no-workflow-narration safeguards. If the repository itself implements reviewer-provider behavior, `--product-terms "<justification>"` permits legitimate product names in that proposal without permitting workflow narration or AI co-authoring. The command checks only the supplied proposal; it never reads, grades, or mutates Git history. Once a commit exists, leave it unchanged and apply any improvement to the next proposal.
 
 ## Development
 

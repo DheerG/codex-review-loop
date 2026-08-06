@@ -12,7 +12,7 @@
   "interface": {
     "displayName": "Review Until Clean",
     "shortDescription": "Independent review and repair until clean.",
-    "longDescription": "Reviews the complete Git change scope with Codex or another provider, guides in-scope repairs, re-reviews until clean, and checks code and Git hygiene before delivery.",
+    "longDescription": "Reviews the complete Git change scope with Codex or another provider, guides in-scope repairs, re-reviews until clean, and keeps review-fix commits product-focused.",
     "developerName": "Dheer Gupta",
     "category": "Developer Tools",
     "capabilities": ["Read", "Write", "Interactive"],
