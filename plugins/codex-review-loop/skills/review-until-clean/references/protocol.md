@@ -41,7 +41,7 @@ Priorities are `P0` through `P3`. For providers other than native Codex, a clean
 NO_IN_SCOPE_FUNCTIONAL_FINDINGS
 ```
 
-Native Codex may instead return an explicit verdict such as `No actionable defects found.` The adapter accepts a clean result only when that verdict or the general sentinel is the sole non-empty output line. Empty output, malformed output, additional prose, a clean verdict mixed with findings, or general praise without an explicit verdict is invalid.
+Native Codex may instead return an explicit verdict such as `No actionable defects found.` A Markdown-formatted `Verdict:` or `Result:` label is allowed. The adapter accepts a clean result only when that verdict or the general sentinel is the sole non-empty output line. Empty output, malformed output, additional prose, a clean verdict mixed with findings, or general praise without an explicit verdict is invalid.
 
 ## Escalation
 

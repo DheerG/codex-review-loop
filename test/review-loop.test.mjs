@@ -14,6 +14,7 @@ import test from "node:test";
 
 import {
   codexFeaturesForReview,
+  codexManagedConfigPath,
   codexMcpDisableOverride,
   codexMcpNamesFromToml,
   codexMcpServersForReview,
@@ -194,6 +195,7 @@ Full review comments:
     "Overall verdict: No actionable defects found.",
     "- **Result:** _No actionable defects found._",
   ]) {
+    assert.equal(parseReview(formattedVerdict, "codex").status, "clean");
     assert.equal(
       parseReview(
         `Review summary: contradictory output
@@ -285,6 +287,7 @@ test("Codex preserves user configuration and has no default round cap", () => {
 
 test("Codex MCP discovery reads TOML without probing configured transports", () => {
   const config = `
+profile = "legacy"
 developer_instructions = """
 [mcp_servers.not_a_real_server]
 """
@@ -298,7 +301,10 @@ command = "dangerous-server"
 [mcp_servers]
 local = { command = "node", args = ["server.mjs", "--secret"] }
 `;
-  assert.deepEqual(codexMcpNamesFromToml(config), [
+  assert.deepEqual(codexMcpNamesFromToml(config), ["docs server", "local"]);
+  assert.deepEqual(codexMcpNamesFromToml(config, "Codex config", {
+    legacyProfiles: true,
+  }), [
     "__proto__",
     "docs server",
     "local",
@@ -312,6 +318,13 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
   assert.throws(
     () => codexMcpNamesFromToml('mcp_servers = "unknown"'),
     /Cannot safely inventory inline mcp_servers/u,
+  );
+  assert.equal(
+    codexManagedConfigPath(
+      { ProgramData: "C:\\ProgramData" },
+      "win32",
+    ),
+    "C:\\ProgramData\\OpenAI\\Codex\\managed_config.toml",
   );
 });
 
@@ -340,7 +353,7 @@ multi_agent                        stable             true
     },
   );
   assert.deepEqual(disabled, ["hooks", "apps", "multi_agent"]);
-  assert.deepEqual(calls[1], disabled);
+  assert.deepEqual(calls, [[], disabled]);
   assert.doesNotMatch(codexReviewArgs(false, [], disabled).join(" "), /multi_agent_v2/u);
 
   assert.throws(
@@ -529,6 +542,33 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "body",
   );
   assert.equal(result.status, 0, result.stderr);
+
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
+    "Run one provider call per review",
+    "--body",
+    narrativeCommitBody,
+    "--product-terms",
+    "The repository implements review-provider behavior",
+  );
+  assert.equal(result.status, 0, result.stderr);
+
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
+    "Preserve retry errors per Codex review feedback",
+    "--body",
+    narrativeCommitBody,
+    "--product-terms",
+    "The repository implements review-provider behavior",
+  );
+  assert.equal(result.status, 2);
+  assert.match(result.stdout, /AI-workflow attribution/u);
 
   result = invoke(
     directory,

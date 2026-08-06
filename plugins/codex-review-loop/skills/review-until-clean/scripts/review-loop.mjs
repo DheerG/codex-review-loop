@@ -625,20 +625,37 @@ function inlineTomlTableKeys(value, source) {
 }
 
 function recordMcpNames(parts, value, names, source) {
-  for (let index = 0; index < parts.length; index += 1) {
-    if (parts[index] !== "mcp_servers") continue;
-    if (parts[index + 1]) {
-      names.add(parts[index + 1]);
-    } else if (value !== undefined) {
-      for (const name of inlineTomlTableKeys(value, source)) names.add(name);
-    }
+  if (parts[0] !== "mcp_servers") return;
+  if (parts[1]) {
+    names.add(parts[1]);
+  } else if (value !== undefined) {
+    for (const name of inlineTomlTableKeys(value, source)) names.add(name);
   }
 }
 
-export function codexMcpNamesFromToml(contents, source = "Codex config") {
+function tomlStringValue(value, source) {
+  const trimmed = value.trim();
+  if (
+    trimmed.length < 2 ||
+    !['"', "'"].includes(trimmed[0]) ||
+    trimmed.at(-1) !== trimmed[0]
+  ) {
+    throw new CliError(`Cannot parse a TOML string in ${source}.`, 3);
+  }
+  const raw = trimmed.slice(1, -1);
+  return trimmed[0] === '"' ? decodeTomlBasicKey(raw, source) : raw;
+}
+
+export function codexMcpNamesFromToml(
+  contents,
+  source = "Codex config",
+  options = {},
+) {
   const names = new Set();
+  const records = [];
   let table = [];
   let multiline = null;
+  let selectedLegacyProfile = null;
   for (const rawLine of contents.split(/\r?\n/u)) {
     if (multiline) {
       if (rawLine.includes(multiline)) multiline = null;
@@ -657,19 +674,38 @@ export function codexMcpNamesFromToml(contents, source = "Codex config") {
         line.slice(opener.length, -closer.length).trim(),
         source,
       );
-      recordMcpNames(table, undefined, names, source);
+      records.push({ parts: table, value: undefined });
       continue;
     }
     const equals = tomlAssignmentIndex(line);
     if (equals < 0) continue;
     const key = parseTomlKeyPath(line.slice(0, equals).trim(), source);
     const value = line.slice(equals + 1).trim();
-    recordMcpNames([...table, ...key], value, names, source);
+    const parts = [...table, ...key];
+    records.push({ parts, value });
+    if (parts.length === 1 && parts[0] === "profile") {
+      selectedLegacyProfile = tomlStringValue(value, source);
+    }
     for (const delimiter of ['"""', "'''"]) {
       const start = value.indexOf(delimiter);
       if (start >= 0 && value.indexOf(delimiter, start + 3) < 0) {
         multiline = delimiter;
       }
+    }
+  }
+  for (const record of records) {
+    if (record.parts[0] === "mcp_servers") {
+      recordMcpNames(record.parts, record.value, names, source);
+      continue;
+    }
+    if (
+      options.legacyProfiles &&
+      selectedLegacyProfile &&
+      record.parts[0] === "profiles" &&
+      record.parts[1] === selectedLegacyProfile &&
+      record.parts[2] === "mcp_servers"
+    ) {
+      recordMcpNames(record.parts.slice(2), record.value, names, source);
     }
   }
   return [...names].sort();
@@ -682,15 +718,27 @@ function codexHome(env) {
 function codexSystemConfig(env) {
   if (process.platform !== "win32") return "/etc/codex/config.toml";
   const programData = env.ProgramData ?? env.PROGRAMDATA;
-  return programData
-    ? path.join(programData, "OpenAI", "Codex", "config.toml")
-    : null;
+  if (!programData) {
+    throw new CliError("Cannot locate Windows system Codex configuration.", 3);
+  }
+  return path.win32.join(programData, "OpenAI", "Codex", "config.toml");
 }
 
-function codexManagedConfig() {
-  return process.platform === "win32"
-    ? path.join(os.homedir(), ".codex", "managed_config.toml")
-    : "/etc/codex/managed_config.toml";
+export function codexManagedConfigPath(
+  env,
+  platform = process.platform,
+) {
+  if (platform !== "win32") return "/etc/codex/managed_config.toml";
+  const programData = env.ProgramData ?? env.PROGRAMDATA;
+  if (!programData) {
+    throw new CliError("Cannot locate Windows managed Codex configuration.", 3);
+  }
+  return path.win32.join(
+    programData,
+    "OpenAI",
+    "Codex",
+    "managed_config.toml",
+  );
 }
 
 function codexManagedPreference(env) {
@@ -715,6 +763,17 @@ function codexManagedPreference(env) {
 }
 
 function configuredCodexMcpServers(state, env) {
+  const version = run("codex", ["--version"], {
+    cwd: state.root,
+    env,
+    allowFailure: true,
+  });
+  const versionMatch = version.stdout.match(/\b(\d+)\.(\d+)\.(\d+)\b/u);
+  if (version.status !== 0 || !versionMatch) {
+    throw new CliError("Cannot determine Codex profile compatibility.", 3);
+  }
+  const legacyProfiles =
+    Number(versionMatch[1]) === 0 && Number(versionMatch[2]) < 134;
   const ordinary = [
     codexSystemConfig(env),
     ...(state.isolateCodexConfig
@@ -734,14 +793,17 @@ function configuredCodexMcpServers(state, env) {
         3,
       );
     }
-    for (const name of codexMcpNamesFromToml(contents, file)) names.add(name);
+    for (const name of codexMcpNamesFromToml(contents, file, { legacyProfiles })) {
+      names.add(name);
+    }
   }
 
-  const managedFile = codexManagedConfig();
+  const managedFile = codexManagedConfigPath(env);
   if (existsSync(managedFile)) {
     const managedNames = codexMcpNamesFromToml(
       readFileSync(managedFile, "utf8"),
       managedFile,
+      { legacyProfiles },
     );
     if (managedNames.length > 0) {
       throw new CliError(
@@ -753,7 +815,9 @@ function configuredCodexMcpServers(state, env) {
   const managedPreference = codexManagedPreference(env);
   if (
     managedPreference &&
-    codexMcpNamesFromToml(managedPreference, "managed Codex preferences").length > 0
+    codexMcpNamesFromToml(managedPreference, "managed Codex preferences", {
+      legacyProfiles,
+    }).length > 0
   ) {
     throw new CliError(
       "Cannot safely override MCP servers from managed Codex preferences.",
@@ -1017,22 +1081,22 @@ function codexExplicitClean(text) {
   return lines.length === 1 && patterns.some((pattern) => pattern.test(lines[0]));
 }
 
+function normalizeCodexCleanLine(line) {
+  return line
+    .trim()
+    .replace(/^(?:[-*>#]\s*)+/u, "")
+    .replace(/[*_`~]/gu, "")
+    .replace(
+      /^(?:(?:overall\s+)?(?:review\s+)?(?:summary|verdict|result|assessment|conclusion|status))\s*(?::|—|-)\s*/iu,
+      "",
+    )
+    .trim();
+}
+
 function containsCodexCleanVerdict(text) {
   return text
     .split(/\r?\n/u)
-    .map((line) => line.trim())
-    .some((line) =>
-      codexExplicitClean(
-        line
-          .replace(/^(?:[-*>#]\s*)+/u, "")
-          .replace(/[*_`~]/gu, "")
-          .replace(
-            /^(?:(?:overall\s+)?(?:review\s+)?(?:summary|verdict|result|assessment|conclusion|status))\s*(?::|—|-)\s*/iu,
-            "",
-          )
-          .trim(),
-      ),
-    );
+    .some((line) => codexExplicitClean(normalizeCodexCleanLine(line)));
 }
 
 export function parseReview(output, provider = "custom") {
@@ -1061,7 +1125,7 @@ export function parseReview(output, provider = "custom") {
     provider === "codex" &&
     !heading &&
     !prioritySyntax &&
-    codexExplicitClean(text);
+    codexExplicitClean(normalizeCodexCleanLine(text));
   const containsNativeCodexClean =
     provider === "codex" && containsCodexCleanVerdict(text);
   const nonemptyLines = text
@@ -1416,7 +1480,8 @@ const WORKFLOW_ATTRIBUTION_PATTERNS = [
   /\b(?:codex|claude|gemini|chatgpt|openai|anthropic)[\s-]+(?:reviewed|generated|suggested|assisted|authored|written|created|made|produced)\b/iu,
   /\b(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance)\s+(?:from|by)\s+(?:codex|claude|gemini|chatgpt|openai|anthropic)\b/iu,
   /\b(?:found|identified|reported|flagged|raised|caught|suggested|requested|required)\s+(?:by|during|in|from|through)\s+(?:(?:the|a)\s+)?(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?(?:review|reviewer|feedback|findings?|comments?)|(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu,
-  /\b(?:per|based\s+on|because\s+of|prompted\s+by|in\s+response\s+to)\s+(?:(?:the|a)\s+)?(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?(?:review|reviewer|feedback|findings?|comments?)|(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu,
+  /\b(?:based\s+on|because\s+of|prompted\s+by|in\s+response\s+to)\s+(?:(?:the|a)\s+)?(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?(?:review|reviewer|feedback|findings?|comments?)|(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu,
+  /\bper\s+(?:(?:the|a)\s+(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?(?:review|reviewer|feedback|findings?|comments?)|(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))|(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?review(?:er)?\s+(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu,
   /\bfollowing\s+(?:(?:the|a)\s+)?(?:(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?review(?:er)?\s+)?(?:feedback|findings?|comments?)|(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?review(?:er)?|(?:codex|claude|gemini|chatgpt|openai|anthropic))\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu,
   /\b(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?review(?:er)?\s+(?:asked|requested|required|suggested|said|recommended|instructed|flagged|identified)\b/iu,
   /\b(?:ai|llm)[ -]?(?:generated|assisted|reviewed|suggested)\b/iu,
