@@ -41,6 +41,8 @@ const CODEX_REVIEW_DISABLED_FEATURES = [
   "multi_agent_mode",
   "collaboration_modes",
   "enable_fanout",
+  "guardian_approval",
+  "guardianv2",
 ];
 const SKILL_SCRIPT = fileURLToPath(import.meta.url);
 
@@ -1103,6 +1105,39 @@ export function codexManagedHazardsFromToml(
   for (const hazard of codexPromptHazardsFromToml(contents, source, options)) {
     hazards.add(hazard);
   }
+  for (const hazard of codexApprovalHazardsFromToml(contents, source, options)) {
+    hazards.add(hazard);
+  }
+  return [...hazards].sort();
+}
+
+export function codexApprovalHazardsFromToml(
+  contents,
+  source = "Codex config",
+  options = {},
+) {
+  const { records, selectedLegacyProfile } = codexConfigRecords(
+    contents,
+    source,
+  );
+  const hazards = new Set();
+  for (const record of records) {
+    const parts = activeCodexRecordParts(
+      record,
+      options,
+      selectedLegacyProfile,
+    );
+    if (parts?.length !== 1) continue;
+    if (parts[0] === "approval_policy") {
+      if (tomlStringValue(record.value ?? "", source) !== "never") {
+        hazards.add("approval_policy");
+      }
+    } else if (parts[0] === "approvals_reviewer") {
+      if (tomlStringValue(record.value ?? "", source) !== "user") {
+        hazards.add("approvals_reviewer");
+      }
+    }
+  }
   return [...hazards].sort();
 }
 
@@ -1258,6 +1293,17 @@ function configuredCodexMcpServers(state, env) {
         3,
       );
     }
+    const approvalHazards = codexApprovalHazardsFromToml(
+      config.contents,
+      config.file,
+      options,
+    );
+    if (approvalHazards.length > 0) {
+      throw new CliError(
+        `Cannot safely isolate Codex approval settings from ${config.file}: ${approvalHazards.join(", ")}.`,
+        3,
+      );
+    }
     for (const name of codexMcpNamesFromToml(
       config.contents,
       config.file,
@@ -1390,6 +1436,8 @@ export function codexReviewArgs(
     ? {}
     : (reviewConfig.preferences ?? {});
   const args = [
+    "--ask-for-approval",
+    "never",
     "exec",
     "--sandbox",
     "read-only",
@@ -1974,7 +2022,7 @@ const PRODUCT_TERM_PATTERNS = [
 const WORKFLOW_ATTRIBUTION_PATTERNS = [
   /\b(?:reviewed|generated|suggested|assisted|authored|written|created|made|produced)\s+(?:by|with)\s+(?:(?:an?|the)\s+)?(?:codex|claude|gemini|chatgpt|openai|anthropic|ai|llm|reviewer)\b/iu,
   /\b(?:(?:an?|the)\s+)?(?:codex|claude|gemini|chatgpt|openai|anthropic|ai|llm|reviewer)[\s-]+(?:reviewed|generated|suggested|assisted|authored|written|created|made|produced)\b/iu,
-  /\b(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance)\s+(?:from|by)\s+(?:codex|claude|gemini|chatgpt|openai|anthropic)\b/iu,
+  /\b(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance)\s+(?:from|by)\s+(?:(?:an?|the)\s+)?(?:codex|claude|gemini|chatgpt|openai|anthropic|ai|llm|reviewer)\b/iu,
   /\b(?:found|identified|reported|flagged|raised|caught|suggested|requested|required)\s+(?:by|during|in|from|through)\s+(?:(?:the|a)\s+)?(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?(?:review|reviewer|feedback|findings?|comments?)|(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu,
   /\b(?:based\s+on|because\s+of|prompted\s+by|in\s+response\s+to)\s+(?:(?:the|a)\s+)?(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?(?:review|reviewer|feedback|findings?|comments?)|(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu,
   /\bper\s+(?:(?:the|a)\s+(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?(?:review|reviewer|feedback|findings?|comments?)|(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))|(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?review(?:er)?\s+(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu,
@@ -1982,7 +2030,7 @@ const WORKFLOW_ATTRIBUTION_PATTERNS = [
   /\b(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?review(?:er)?\s+(?:asked|requested|required|suggested|said|recommended|instructed|flagged|identified)\b/iu,
   /\b(?:(?:an?|the)\s+)?(?:(?:ai|llm)(?:\s+review(?:er)?)?|review(?:er)?)\s+(?:found|identified|reported|flagged|raised|caught|suggested|requested|required)\b/iu,
   /\b(?:found|identified|reported|flagged|raised|caught|suggested|requested|required)\s+(?:by|during|in|from|through)\s+(?:(?:an?|the)\s+)?(?:(?:ai|llm)(?:\s+review(?:er)?)?|review(?:er)?)\b/iu,
-  /\b(?:address(?:es|ed|ing)?|appl(?:y|ies|ied|ying)|fix(?:es|ed|ing)?|resolv(?:e|es|ed|ing)|handl(?:e|es|ed|ing)|incorporat(?:e|es|ed|ing)|implement(?:s|ed|ing)?|clos(?:e|es|ed|ing)|clear(?:s|ed|ing)?|tackl(?:e|es|ed|ing)|satisf(?:y|ies|ied|ying))\s+(?:the\s+)?(?:(?:(?:ai|llm)\s+)?review(?:er)?\s+)?(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance)\b/iu,
+  /\b(?:address(?:es|ed|ing)?|appl(?:y|ies|ied|ying)|fix(?:es|ed|ing)?|resolv(?:e|es|ed|ing)|handl(?:e|es|ed|ing)|incorporat(?:e|es|ed|ing)|implement(?:s|ed|ing)?|clos(?:e|es|ed|ing)|clear(?:s|ed|ing)?|tackl(?:e|es|ed|ing)|satisf(?:y|ies|ied|ying))\s+(?:the\s+)?(?:(?:ai|llm)(?:\s+review(?:er)?)?|review(?:er)?)\s+(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance)\b/iu,
   /\b(?:ai|llm)[ -]?(?:generated|assisted|reviewed|suggested)\b/iu,
   /\breview(?:er)?[ -]?round\s*#?\d+\b/iu,
 ];

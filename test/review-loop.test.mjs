@@ -14,6 +14,7 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  codexApprovalHazardsFromToml,
   codexFeaturesForReview,
   codexManagedHazardsFromToml,
   codexManagedConfigPath,
@@ -233,6 +234,8 @@ test("Codex preserves allowlisted preferences and has no default round cap", () 
     },
   );
   assert.deepEqual(configuredArgs, [
+    "--ask-for-approval",
+    "never",
     "exec",
     "--sandbox",
     "read-only",
@@ -260,6 +263,9 @@ test("Codex preserves allowlisted preferences and has no default round cap", () 
   });
   assert.equal(isolatedArgs.includes("--ignore-user-config"), true);
   assert.equal(isolatedArgs.includes("must-not-load"), false);
+  const defaultArgs = codexReviewArgs();
+  assert.equal(defaultArgs.includes("guardian_approval"), true);
+  assert.equal(defaultArgs.includes("guardianv2"), true);
   assert.equal(reviewRoundLimit("codex", undefined), null);
   assert.equal(reviewRoundLimit("custom", undefined), 15);
   assert.equal(reviewRoundLimit("codex", "7"), 7);
@@ -365,6 +371,18 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
       "[features]\nmulti_agent_mode = true",
     ),
     ["features.multi_agent_mode"],
+  );
+  assert.deepEqual(
+    codexApprovalHazardsFromToml(
+      'approval_policy = "on-request"\napprovals_reviewer = "auto_review"',
+    ),
+    ["approval_policy", "approvals_reviewer"],
+  );
+  assert.deepEqual(
+    codexApprovalHazardsFromToml(
+      'approval_policy = "never"\napprovals_reviewer = "user"',
+    ),
+    [],
   );
 
   const selectedLegacyProfile = codexSelectedLegacyProfileFromToml(
@@ -812,6 +830,26 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     );
     assert.equal(result.status, 2, `${attribution}\n${result.stdout}`);
     assert.match(result.stdout, /AI-workflow attribution/u);
+  }
+
+  for (const productSubject of [
+    "Implement request validation",
+    "Fix feedback submission",
+  ]) {
+    result = invoke(
+      directory,
+      env,
+      "check-commit-message",
+      "--subject",
+      productSubject,
+      "--body",
+      narrativeCommitBody,
+      "--policy",
+      "Repository product language",
+      "--policy-overrides",
+      "all",
+    );
+    assert.equal(result.status, 0, `${productSubject}\n${result.stdout}`);
   }
 
   result = invoke(
