@@ -388,7 +388,7 @@ export function codexMcpDisableOverride(servers) {
   if (!Array.isArray(servers)) {
     throw new CliError("Codex MCP inventory is not an array.", 3);
   }
-  const disabled = {};
+  const disabled = Object.create(null);
   for (const server of servers) {
     if (!server?.enabled) continue;
     if (typeof server.name !== "string" || !server.name) {
@@ -626,10 +626,14 @@ function containsCodexCleanVerdict(text) {
     .map((line) => line.trim())
     .some((line) =>
       codexExplicitClean(
-        line.replace(
-          /^(?:review\s+summary|summary|verdict|result):\s*/iu,
-          "",
-        ),
+        line
+          .replace(/^(?:[-*>#]\s*)+/u, "")
+          .replace(/[*_`~]/gu, "")
+          .replace(
+            /^(?:(?:overall\s+)?(?:review\s+)?(?:summary|verdict|result|assessment|conclusion|status))\s*(?::|—|-)\s*/iu,
+            "",
+          )
+          .trim(),
       ),
     );
 }

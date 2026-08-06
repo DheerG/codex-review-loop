@@ -184,6 +184,22 @@ Full review comments:
     ).status,
     "invalid",
   );
+  for (const formattedVerdict of [
+    "**Verdict:** No actionable defects found.",
+    "Overall verdict: No actionable defects found.",
+    "- **Result:** _No actionable defects found._",
+  ]) {
+    assert.equal(
+      parseReview(
+        `Review summary: contradictory output
+Full review comments:
+- [P1] Preserve retry failures — src/retry.js:42
+${formattedVerdict}`,
+        "codex",
+      ).status,
+      "invalid",
+    );
+  }
 });
 
 test("Codex preserves user configuration and has no default round cap", () => {
@@ -222,6 +238,14 @@ test("Codex preserves user configuration and has no default round cap", () => {
 
   const mcpServers = [
     {
+      name: "__proto__",
+      enabled: true,
+      transport: {
+        type: "stdio",
+        command: "dangerous-server",
+      },
+    },
+    {
       name: "docs server",
       enabled: true,
       transport: {
@@ -244,6 +268,7 @@ test("Codex preserves user configuration and has no default round cap", () => {
   const mcpOverride = codexMcpDisableOverride(mcpServers);
   assert.match(mcpOverride, /^mcp_servers=/u);
   assert.match(mcpOverride, /"docs server"/u);
+  assert.match(mcpOverride, /"__proto__"/u);
   assert.match(mcpOverride, /"enabled"=false/u);
   assert.match(mcpOverride, /codex-review-loop-disabled-mcp/u);
   assert.match(mcpOverride, /https:\/\/disabled\.invalid\/mcp/u);
