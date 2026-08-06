@@ -175,7 +175,7 @@ function resolveBase(root, requested) {
     if (!refExists(root, base)) {
       throw new CliError(`Base ref does not resolve to a commit: ${base}`, 2);
     }
-    return base;
+    return git(root, ["rev-parse", "--verify", `${base}^{commit}`]).stdout.trim();
   }
 
   const remoteHead = git(
@@ -198,7 +198,7 @@ function resolveBase(root, requested) {
       2,
     );
   }
-  return base;
+  return git(root, ["rev-parse", "--verify", `${base}^{commit}`]).stdout.trim();
 }
 
 function splitNull(value) {
@@ -571,13 +571,14 @@ function tomlAssignmentIndex(line) {
   return -1;
 }
 
-function inlineTomlTableKeys(value, source) {
+function inlineTomlTableEntries(
+  value,
+  source,
+  failure = `Cannot safely inspect an inline TOML table in ${source}.`,
+) {
   const trimmed = value.trim();
   if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) {
-    throw new CliError(
-      `Cannot safely inventory inline mcp_servers in ${source}.`,
-      3,
-    );
+    throw new CliError(failure, 3);
   }
   const entries = [];
   let start = 1;
@@ -614,13 +615,37 @@ function inlineTomlTableKeys(value, source) {
     .map((entry) => {
       const equals = tomlAssignmentIndex(entry);
       if (equals < 0) {
-        throw new CliError(
-          `Cannot safely inventory inline mcp_servers in ${source}.`,
-          3,
-        );
+        throw new CliError(failure, 3);
       }
-      return parseTomlKeyPath(entry.slice(0, equals).trim(), source)[0];
+      const entryValue = entry.slice(equals + 1).trim();
+      if (!entryValue) {
+        throw new CliError(failure, 3);
+      }
+      return {
+        parts: parseTomlKeyPath(entry.slice(0, equals).trim(), source),
+        value: entryValue,
+      };
     });
+}
+
+function inlineTomlTableKeys(value, source) {
+  return inlineTomlTableEntries(
+    value,
+    source,
+    `Cannot safely inventory inline mcp_servers in ${source}.`,
+  ).map((entry) => entry.parts[0]);
+}
+
+function expandInlineTomlRecords(records, parts, value, source) {
+  if (!value.trim().startsWith("{")) return;
+  for (const entry of inlineTomlTableEntries(value, source)) {
+    const nested = {
+      parts: [...parts, ...entry.parts],
+      value: entry.value,
+    };
+    records.push(nested);
+    expandInlineTomlRecords(records, nested.parts, nested.value, source);
+  }
 }
 
 function recordMcpNames(parts, value, names, source) {
@@ -715,6 +740,7 @@ function codexConfigRecords(contents, source) {
     }
     const parts = [...table, ...key];
     records.push({ parts, value });
+    expandInlineTomlRecords(records, parts, value, source);
     if (parts.length === 1 && parts[0] === "profile") {
       selectedLegacyProfile = tomlStringValue(value, source);
     }
@@ -1702,7 +1728,7 @@ function inspectCommitMessageWithPolicy(subject, body, options) {
     issues.push("message contains reviewer or AI-workflow attribution");
   }
   if (
-    /\b(?:to satisfy|in response to|as requested by|per|based\s+on|because\s+of|prompted\s+by)\s+(?:the\s+)?(?:(?:review|reviewer|feedback|findings?|comments?)|(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?review(?:er)?\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance)|(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu.test(
+    /\b(?:to satisfy|in response to|as requested by|based\s+on|because\s+of|prompted\s+by)\s+(?:the\s+)?(?:(?:review|reviewer|feedback|findings?|comments?)|(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?review(?:er)?\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance)|(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu.test(
       body,
     ) ||
     /\bfollowing\s+(?:the\s+)?(?:(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?review(?:er)?\s+)?(?:feedback|findings?|comments?)|(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?review(?:er)?|(?:codex|claude|gemini|chatgpt|openai|anthropic))\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu.test(

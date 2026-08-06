@@ -391,6 +391,22 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
     ),
     ["notify"],
   );
+  assert.deepEqual(
+    codexMcpNamesFromToml(
+      'profiles = { work = { mcp_servers = { writer = { command = "writer" } } } }',
+      "system config",
+      { legacyProfiles: true, selectedLegacyProfile },
+    ),
+    ["writer"],
+  );
+  assert.deepEqual(
+    codexManagedHazardsFromToml(
+      'profiles = { work = { sandbox_mode = "workspace-write", notify = ["write"] } }',
+      "managed config",
+      { legacyProfiles: true, selectedLegacyProfile },
+    ),
+    ["notify", "sandbox_mode"],
+  );
 });
 
 test("Codex feature probing adapts to supported flags and fails closed", () => {
@@ -626,6 +642,23 @@ test("check-commit-message validates a proposed repair commit", (t) => {
   assert.equal(effectivePolicy.policy.source, "CONTRIBUTING.md");
   assert.deepEqual(effectivePolicy.policy.overrides, ["subject"]);
 
+  const productFrequencyBody = narrativeCommitBody.replace(
+    "Preserve the terminal failure across retry boundaries for batch and streaming callers.",
+    "Invoke exactly one provider call per review for batch and streaming callers.",
+  );
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
+    "Limit provider calls by review",
+    "--body",
+    productFrequencyBody,
+    "--product-terms",
+    "The repository implements review-provider behavior",
+  );
+  assert.equal(result.status, 0, result.stderr);
+
   result = invoke(
     directory,
     env,
@@ -849,6 +882,39 @@ test("check-commit-message validates a proposed repair commit", (t) => {
   );
   assert.equal(result.status, 0, result.stderr);
 
+});
+
+test("start pins a moving base before later commits", (t) => {
+  const { directory, provider } = repositoryFixture(t);
+  writeFileSync(
+    provider,
+    `let input = "";
+process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("end", () => {
+  process.stdout.write(input.includes("- app.js\\n") ? process.env.MOCK_REVIEW : "missing app.js");
+});\n`,
+  );
+  const env = reviewEnvironment(provider, "NO_IN_SCOPE_FUNCTIONAL_FINDINGS");
+  const originalHead = git(directory, "rev-parse", "HEAD");
+  let result = invoke(
+    directory,
+    env,
+    "start",
+    "--provider",
+    "custom",
+    "--base",
+    "HEAD",
+    "--outcome",
+    "Update the exported value",
+  );
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).state.base, originalHead);
+
+  git(directory, "add", "app.js");
+  git(directory, "commit", "-qm", "Update exported value");
+  result = invoke(directory, env, "review");
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).status, "clean");
 });
 
 test("a clean result is bound to the reviewed snapshot", (t) => {
