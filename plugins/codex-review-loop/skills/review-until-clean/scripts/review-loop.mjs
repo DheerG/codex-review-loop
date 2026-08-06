@@ -119,6 +119,9 @@ function loadActive(repo) {
     state.schemaVersion = STATE_SCHEMA_VERSION;
     if (state.phase === "clean" || state.lastReview?.status === "clean") {
       state.phase = "invalid";
+      if (state.maxRounds !== null && state.round >= state.maxRounds) {
+        state.maxRounds = state.round + 1;
+      }
       state.lastReview = {
         ...state.lastReview,
         status: "invalid",
@@ -365,6 +368,8 @@ function parseCustomCommand(env) {
 export function codexReviewArgs(isolateUserConfig = false) {
   return [
     "exec",
+    "--sandbox",
+    "read-only",
     "review",
     "--ephemeral",
     ...(isolateUserConfig ? ["--ignore-user-config"] : []),
@@ -889,8 +894,8 @@ const PRODUCT_TERM_PATTERNS = [
 const WORKFLOW_ATTRIBUTION_PATTERNS = [
   /\b(?:reviewed|generated|suggested|assisted)\s+(?:by|with)\s+(?:codex|claude|gemini|chatgpt|openai|anthropic)\b/iu,
   /\b(?:codex|claude|gemini|chatgpt|openai|anthropic)[\s-]+(?:reviewed|generated|suggested|assisted)\b/iu,
-  /\b(?:found|identified|reported|flagged|raised|caught|suggested|requested|required)\s+(?:by|during|in|from|through)\s+(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?(?:review|reviewer|feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance)\b/iu,
-  /\b(?:after|following|per|during|from|in\s+response\s+to)\s+(?:(?:the|a)\s+)?(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?(?:review|reviewer|feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance)\b/iu,
+  /\b(?:found|identified|reported|flagged|raised|caught|suggested|requested|required)\s+(?:by|during|in|from|through)\s+(?:(?:the|a)\s+)?(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?(?:review|reviewer|feedback|findings?|comments?)|(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu,
+  /\b(?:after|following|per|during|from|based\s+on|because\s+of|prompted\s+by|in\s+response\s+to)\s+(?:(?:the|a)\s+)?(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?(?:review|reviewer|feedback|findings?|comments?)|(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu,
   /\b(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+(?:found|identified|reported|flagged|raised|caught|suggested|requested|required)\b/iu,
   /\b(?:ai|llm)[ -]?(?:generated|assisted|reviewed|suggested)\b/iu,
   /\breview(?:er)?[ -]?round\s*#?\d+\b/iu,
@@ -952,10 +957,10 @@ function inspectCommitMessageWithPolicy(subject, body, options) {
     issues.push("message contains reviewer or AI-workflow attribution");
   }
   if (
-    /\b(?:to satisfy|in response to|as requested by|per|following)\s+(?:the\s+)?(?:review|reviewer|feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance)\b/iu.test(
+    /\b(?:to satisfy|in response to|as requested by|per|following|based\s+on|because\s+of|prompted\s+by)\s+(?:the\s+)?(?:(?:review|reviewer|feedback|findings?|comments?)|(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?review(?:er)?\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance)|(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu.test(
       body,
     ) ||
-    /\b(?:review|reviewer|feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance)\s+(?:asked|requested|required|suggested|said)\b/iu.test(
+    /\b(?:(?:review|reviewer|feedback|findings?|comments?)|(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?review(?:er)?\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance)|(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))\s+(?:asked|requested|required|suggested|said)\b/iu.test(
       body,
     )
   ) {

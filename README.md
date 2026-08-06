@@ -203,7 +203,7 @@ Each `review` command invokes exactly one reviewer round. An invalid response ex
 3. Claude Code
 4. OpenCode
 
-Codex runs in native review mode and inherits `config.toml`, including the selected model and reasoning effort. Use `start --isolate-codex-config` only when you deliberately want to ignore that configuration. Codex has no default round cap; other providers stop at 15 rounds unless `--max-rounds` is supplied.
+Codex runs in native review mode, explicitly forces its read-only sandbox, and inherits `config.toml`, including the selected model and reasoning effort. Use `start --isolate-codex-config` only when you deliberately want to ignore that configuration. Codex has no default round cap; other providers stop at 15 rounds unless `--max-rounds` is supplied.
 
 The Codex adapter recognizes structurally isolated native clean verdicts such as `No actionable defects found.` Other providers remain bound to the exact clean sentinel. For every provider, the clean verdict must be the sole non-empty output line.
 

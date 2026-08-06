@@ -166,9 +166,18 @@ test("Codex accepts explicit native clean language without weakening other provi
 });
 
 test("Codex preserves user configuration and has no default round cap", () => {
-  assert.deepEqual(codexReviewArgs(), ["exec", "review", "--ephemeral", "-"]);
+  assert.deepEqual(codexReviewArgs(), [
+    "exec",
+    "--sandbox",
+    "read-only",
+    "review",
+    "--ephemeral",
+    "-",
+  ]);
   assert.deepEqual(codexReviewArgs(true), [
     "exec",
+    "--sandbox",
+    "read-only",
     "review",
     "--ephemeral",
     "--ignore-user-config",
@@ -437,6 +446,31 @@ test("check-commit-message validates a proposed repair commit", (t) => {
   assert.equal(result.status, 2);
   assert.match(result.stdout, /single line/u);
 
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
+    "Preserve weak-tag semantics",
+    "--body",
+    `${narrativeCommitBody}\n\nRationale:\nFollowing guidance in RFC 9110, preserve weak-tag semantics.`,
+  );
+  assert.equal(result.status, 0, result.stderr);
+
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
+    "Preserve retries based on Codex review feedback",
+    "--body",
+    narrativeCommitBody,
+    "--product-terms",
+    "The repository ships reviewer integrations",
+  );
+  assert.equal(result.status, 2);
+  assert.match(result.stdout, /AI-workflow attribution/u);
+
 });
 
 test("a clean result is bound to the reviewed snapshot", (t) => {
@@ -538,6 +572,7 @@ test("legacy clean state requires a new review under the current verdict contrac
   const activeFile = path.join(storage, "active.json");
   const legacy = JSON.parse(readFileSync(activeFile, "utf8"));
   legacy.schemaVersion = 1;
+  legacy.maxRounds = legacy.round;
   writeFileSync(activeFile, `${JSON.stringify(legacy, null, 2)}\n`);
 
   result = invoke(directory, env, "status");
@@ -545,6 +580,7 @@ test("legacy clean state requires a new review under the current verdict contrac
   const migrated = JSON.parse(result.stdout);
   assert.equal(migrated.state.phase, "invalid");
   assert.equal(migrated.state.lastReview.status, "invalid");
+  assert.equal(migrated.state.maxRounds, migrated.state.round + 1);
   assert.match(migrated.state.lastReview.reason, /predates the current verdict/u);
 
   result = invoke(directory, env, "finish", "--reason", "clean");

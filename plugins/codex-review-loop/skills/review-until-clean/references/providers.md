@@ -4,7 +4,7 @@ The engine selects the first installed provider in this order when `--provider a
 
 | Provider | Command | Read-only mechanism |
 | --- | --- | --- |
-| `codex` | `codex exec review --ephemeral -` | Native Codex review mode |
+| `codex` | `codex exec --sandbox read-only review --ephemeral -` | Explicit read-only sandbox plus native Codex review mode |
 | `gemini` | `gemini -p ... --output-format json` | Explicit review-only prompt |
 | `claude` | `claude -p ... --permission-mode plan --tools Bash,Read,Glob,Grep` | Plan permission mode and read tools |
 | `opencode` | `opencode run --agent plan ...` | Plan agent |
