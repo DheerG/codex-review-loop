@@ -903,26 +903,22 @@ function tomlStringArrayValue(value, source) {
   return entries.map((entry) => tomlStringValue(entry, source));
 }
 
-function tomlContainerBalance(value) {
-  let balance = 0;
-  let quote = null;
-  let escaped = false;
+function advanceTomlContainerState(state, value) {
   for (const character of value) {
-    if (quote === '"') {
-      if (escaped) escaped = false;
-      else if (character === "\\") escaped = true;
-      else if (character === quote) quote = null;
+    if (state.quote === '"') {
+      if (state.escaped) state.escaped = false;
+      else if (character === "\\") state.escaped = true;
+      else if (character === state.quote) state.quote = null;
       continue;
     }
-    if (quote === "'") {
-      if (character === quote) quote = null;
+    if (state.quote === "'") {
+      if (character === state.quote) state.quote = null;
       continue;
     }
-    if (character === '"' || character === "'") quote = character;
-    else if (character === "{" || character === "[") balance += 1;
-    else if (character === "}" || character === "]") balance -= 1;
+    if (character === '"' || character === "'") state.quote = character;
+    else if (character === "{" || character === "[") state.balance += 1;
+    else if (character === "}" || character === "]") state.balance -= 1;
   }
-  return balance;
 }
 
 function codexConfigRecords(contents, source) {
@@ -953,13 +949,15 @@ function codexConfigRecords(contents, source) {
     const key = parseTomlKeyPath(line.slice(0, equals).trim(), source);
     let value = line.slice(equals + 1).trim();
     if (value.startsWith("{") || value.startsWith("[")) {
-      let balance = tomlContainerBalance(value);
-      while (balance > 0 && lineNumber + 1 < lines.length) {
+      const container = { balance: 0, quote: null, escaped: false };
+      advanceTomlContainerState(container, value);
+      while (container.balance > 0 && lineNumber + 1 < lines.length) {
         lineNumber += 1;
-        value += `\n${stripTomlComment(lines[lineNumber]).trim()}`;
-        balance = tomlContainerBalance(value);
+        const continuation = stripTomlComment(lines[lineNumber]).trim();
+        value += `\n${continuation}`;
+        advanceTomlContainerState(container, `\n${continuation}`);
       }
-      if (balance !== 0) {
+      if (container.balance !== 0) {
         throw new CliError(
           `Cannot parse a multiline inline TOML value in ${source}.`,
           3,
@@ -1166,11 +1164,40 @@ export function codexManagedHazardsFromToml(
     source,
   );
   const hazards = new Set();
-  for (const record of effectiveCodexRecords(
+  const effectiveRecords = effectiveCodexRecords(
     records,
     options,
     selectedLegacyProfile,
-  )) {
+  );
+  const managedFeatures = new Map();
+  for (const record of effectiveRecords) {
+    const { parts } = record;
+    if (
+      parts[0] !== "features" ||
+      !CODEX_REVIEW_DISABLED_FEATURES.includes(parts[1])
+    ) {
+      continue;
+    }
+    const feature = managedFeatures.get(parts[1]) ?? {};
+    if (parts.length === 2) feature.container = record.value;
+    else if (parts.length === 3 && parts[2] === "enabled") {
+      feature.enabled = record.value;
+    }
+    managedFeatures.set(parts[1], feature);
+  }
+  for (const [name, feature] of managedFeatures) {
+    const container = feature.container?.trim();
+    const value =
+      container === undefined || container.startsWith("{")
+        ? feature.enabled?.trim()
+        : container;
+    if (value === undefined) continue;
+    if (!["true", "false"].includes(value)) {
+      throw new CliError(`Cannot parse a managed feature in ${source}.`, 3);
+    }
+    if (value === "true") hazards.add(`features.${name}`);
+  }
+  for (const record of effectiveRecords) {
     const { parts } = record;
     if (parts.length === 1 && parts[0] === "notify") {
       if (
@@ -1187,15 +1214,6 @@ export function codexManagedHazardsFromToml(
       // Unprefixed permission names may resolve to a user-defined profile.
       // Only Codex's built-in read-only profile is safe to accept here.
       if (value !== ":read-only") hazards.add(parts[0]);
-    } else if (
-      parts[0] === "features" &&
-      CODEX_REVIEW_DISABLED_FEATURES.includes(parts[1])
-    ) {
-      const value = record.value?.trim();
-      if (!["true", "false"].includes(value)) {
-        throw new CliError(`Cannot parse a managed feature in ${source}.`, 3);
-      }
-      if (value === "true") hazards.add(`features.${parts[1]}`);
     } else if (
       parts[0] === "projects" &&
       parts.at(-1) === "trust_level" &&
@@ -2083,6 +2101,7 @@ async function startCommand(repo, options, env) {
 
 async function reviewCommand(repo, env) {
   const state = loadActive(repo);
+  state.root = repo.root;
   if (!["active", "provider_error", "invalid", "clean"].includes(state.phase)) {
     throw new CliError(
       `Run phase is ${state.phase}; it cannot start another review round.`,

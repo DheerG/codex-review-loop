@@ -404,6 +404,18 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
     ["features.multi_agent_mode"],
   );
   assert.deepEqual(
+    codexManagedHazardsFromToml(
+      "features.multi_agent_v2 = { enabled = false, max_concurrent_threads_per_session = 2 }",
+    ),
+    [],
+  );
+  assert.deepEqual(
+    codexManagedHazardsFromToml(
+      "[features.multi_agent_v2]\nenabled = true\nmax_concurrent_threads_per_session = 2",
+    ),
+    ["features.multi_agent_v2"],
+  );
+  assert.deepEqual(
     codexApprovalHazardsFromToml(
       'approval_policy = "on-request"\napprovals_reviewer = "auto_review"',
     ),
@@ -577,6 +589,19 @@ default_permissions = ":read-only"
   );
 });
 
+test("Codex config scanning remains linear for multiline containers", () => {
+  const config = `notify = [\n${Array.from(
+    { length: 8_000 },
+    () => '  "entry",',
+  ).join("\n")}\n]`;
+  const startedAt = performance.now();
+  assert.deepEqual(codexManagedHazardsFromToml(config), ["notify"]);
+  assert.ok(
+    performance.now() - startedAt < 1_500,
+    "an 8,000-line TOML container should parse in linear time",
+  );
+});
+
 test("Codex config reads reject oversized and non-regular inputs", (t) => {
   const directory = mkdtempSync(path.join(os.tmpdir(), "review-loop-config-"));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
@@ -715,6 +740,54 @@ test("doctor reports Codex availability from the target safety preflight", (t) =
     report.providers.codex,
     report.providerDiagnostics.codex === "ready",
   );
+});
+
+test("resumed reviews refresh a stale persisted repository root", (t) => {
+  const { directory, provider } = repositoryFixture(t);
+  const repositoryRoot = git(directory, "rev-parse", "--show-toplevel");
+  const env = {
+    ...reviewEnvironment(provider, "unused"),
+    EXPECTED_REPOSITORY: repositoryRoot,
+  };
+  let result = invoke(
+    directory,
+    env,
+    "start",
+    "--outcome",
+    "Preserve review scope after moving a repository",
+    "--base",
+    "HEAD",
+    "--provider",
+    "custom",
+  );
+  assert.equal(result.status, 0, result.stderr);
+
+  const activeFile = path.join(
+    directory,
+    git(directory, "rev-parse", "--git-path", "codex-review-loop/active.json"),
+  );
+  const state = JSON.parse(readFileSync(activeFile, "utf8"));
+  state.root = path.join(directory, "old-location");
+  writeFileSync(activeFile, `${JSON.stringify(state, null, 2)}\n`);
+  writeFileSync(
+    provider,
+    `let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("end", () => {
+  const expected = \`Repository: \${process.env.EXPECTED_REPOSITORY}\`;
+  process.stdout.write(input.includes(expected)
+    ? "NO_IN_SCOPE_FUNCTIONAL_FINDINGS"
+    : "Review output used the stale repository root.");
+});
+`,
+  );
+
+  result = invoke(directory, env, "review");
+  assert.equal(result.status, 0, result.stderr);
+  const review = JSON.parse(result.stdout);
+  assert.equal(review.status, "clean");
+  assert.equal(JSON.parse(readFileSync(activeFile, "utf8")).root, repositoryRoot);
 });
 
 test("the reviewer treats commit messages as untrusted non-review context", () => {
