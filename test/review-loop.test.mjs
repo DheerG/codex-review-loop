@@ -143,6 +143,21 @@ test("Codex accepts explicit native clean language without weakening other provi
     ).status,
     "invalid",
   );
+  for (const contradiction of [
+    "No actionable defects found. One defect remains in the retry path.",
+    "No actionable defects found. Two bugs remain in the retry path.",
+    "No actionable defects found. A finding remains in the retry path.",
+    "No actionable defects found. There is an issue in the retry path.",
+  ]) {
+    assert.equal(parseReview(contradiction, "codex").status, "invalid");
+  }
+  assert.equal(
+    parseReview(
+      "No actionable defects found. No issues remain in the retry path.",
+      "codex",
+    ).status,
+    "clean",
+  );
 });
 
 test("Codex preserves user configuration and has no default round cap", () => {
@@ -312,19 +327,27 @@ test("check-commit-message validates a proposed repair commit", (t) => {
   const productTerms = JSON.parse(result.stdout);
   assert.match(productTerms.productTerms.justification, /ships the codex-review-loop/u);
 
-  result = invoke(
-    directory,
-    env,
-    "check-commit-message",
-    "--subject",
+  for (const subject of [
     "Address Codex review feedback",
-    "--repository-policy",
-    "CONTRIBUTING.md",
-    "--product-terms",
-    "The repository ships reviewer integrations",
-  );
-  assert.equal(result.status, 2);
-  assert.match(result.stdout, /review workflow|AI-workflow attribution/u);
+    "Record review round 2",
+    "Codex-assisted retry fix",
+    "Reviewed by Codex",
+  ]) {
+    result = invoke(
+      directory,
+      env,
+      "check-commit-message",
+      "--subject",
+      subject,
+      "--repository-policy",
+      "CONTRIBUTING.md",
+      "--product-terms",
+      "The repository ships reviewer integrations",
+    );
+    assert.equal(result.status, 2, `${subject}\n${result.stdout}`);
+    assert.match(result.stdout, /review workflow|AI-workflow attribution/u);
+  }
+
 });
 
 test("a clean result is bound to the reviewed snapshot", (t) => {

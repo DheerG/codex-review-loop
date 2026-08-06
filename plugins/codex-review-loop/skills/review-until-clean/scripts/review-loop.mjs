@@ -509,7 +509,7 @@ function codexExplicitClean(text) {
 }
 
 function hasContradictoryQualification(text) {
-  return /\b(?:but|however|except|although|though|yet|fails?|breaks?|broken|incorrect)\b|\b(?:a|an|one|remaining|potential|possible|the)\s+(?:concerns?|problems?|risks?|failures?|bugs?)\b|\bthere(?:'s| is)\s+(?:a\s+)?(?:concerns?|problems?|risks?|failures?|bugs?)\b/iu.test(
+  return /\b(?:but|however|except|although|though|yet|fails?|breaks?|broken|incorrect)\b|\b(?:a|an|another|one|two|three|four|five|six|seven|eight|nine|ten|\d+|some|several|many|multiple|remaining|potential|possible|the)\s+(?:(?:remaining|potential|possible)\s+)?(?:concerns?|problems?|risks?|failures?|bugs?|defects?|findings?|issues?)\b|\bthere(?:'s| is| are)\s+(?:(?:a|an|one|two|three|several|some|multiple|\d+)\s+)?(?:concerns?|problems?|risks?|failures?|bugs?|defects?|findings?|issues?)\b/iu.test(
     text,
   );
 }
@@ -876,15 +876,28 @@ async function reviewCommand(repo, env) {
   };
 }
 
-const ATTRIBUTION_PATTERNS = [
-  /\b(?:codex|claude|gemini|chatgpt|openai|anthropic)\b.{0,50}\b(?:review|reviewer|feedback|finding|loop|suggest)/iu,
-  /\b(?:review|reviewer|feedback|finding|loop|suggest)\b.{0,50}\b(?:codex|claude|gemini|chatgpt|openai|anthropic)\b/iu,
+const PRODUCT_TERM_PATTERNS = [
+  /\b(?:codex|claude|gemini|chatgpt|openai|anthropic)\b.{0,50}\b(?:review|reviewer|loop)\b/iu,
+  /\b(?:review|reviewer|loop)\b.{0,50}\b(?:codex|claude|gemini|chatgpt|openai|anthropic)\b/iu,
+];
+
+const WORKFLOW_ATTRIBUTION_PATTERNS = [
+  /\b(?:codex|claude|gemini|chatgpt|openai|anthropic)\b.{0,50}\b(?:feedback|findings?|comments?|suggest(?:ion|ed|s)?)\b/iu,
+  /\b(?:feedback|findings?|comments?|suggest(?:ion|ed|s)?)\b.{0,50}\b(?:codex|claude|gemini|chatgpt|openai|anthropic)\b/iu,
+  /\b(?:reviewed|generated|suggested|assisted)\s+(?:by|with)\s+(?:codex|claude|gemini|chatgpt|openai|anthropic)\b/iu,
+  /\b(?:codex|claude|gemini|chatgpt|openai|anthropic)[\s-]+(?:reviewed|generated|suggested|assisted)\b/iu,
   /\b(?:ai|llm)[ -]?(?:generated|assisted|reviewed|suggested)\b/iu,
   /\breview(?:er)?[ -]?round\s*#?\d+\b/iu,
 ];
 
-function hasAttribution(text) {
-  return ATTRIBUTION_PATTERNS.some((pattern) => pattern.test(text));
+function hasAttribution(text, allowProductTerms) {
+  if (WORKFLOW_ATTRIBUTION_PATTERNS.some((pattern) => pattern.test(text))) {
+    return true;
+  }
+  return (
+    !allowProductTerms &&
+    PRODUCT_TERM_PATTERNS.some((pattern) => pattern.test(text))
+  );
 }
 
 export function inspectCommitMessage(subject, body = "") {
@@ -925,7 +938,7 @@ function inspectCommitMessageWithPolicy(subject, body, options) {
   ) {
     issues.push("subject describes the review workflow instead of product behavior");
   }
-  if (!options.allowProductTerms && hasAttribution(`${subject}\n${body}`)) {
+  if (hasAttribution(`${subject}\n${body}`, options.allowProductTerms)) {
     issues.push("message contains reviewer or AI-workflow attribution");
   }
   if (
