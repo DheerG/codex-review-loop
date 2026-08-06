@@ -229,6 +229,7 @@ test("Codex preserves allowlisted preferences and has no default round cap", () 
       root: "/tmp/project",
       preferences: {
         model: "gpt-test",
+        review_model: "gpt-review",
         model_reasoning_effort: "high",
       },
     },
@@ -244,7 +245,7 @@ test("Codex preserves allowlisted preferences and has no default round cap", () 
     "-c",
     'projects={"/tmp/project"={"trust_level"="untrusted"}}',
     "--model",
-    "gpt-test",
+    "gpt-review",
     "-c",
     'model_reasoning_effort="high"',
     "--disable",
@@ -266,6 +267,7 @@ test("Codex preserves allowlisted preferences and has no default round cap", () 
   const defaultArgs = codexReviewArgs();
   assert.equal(defaultArgs.includes("guardian_approval"), true);
   assert.equal(defaultArgs.includes("guardianv2"), true);
+  assert.equal(defaultArgs.includes("codex_hooks"), true);
   assert.equal(reviewRoundLimit("codex", undefined), null);
   assert.equal(reviewRoundLimit("custom", undefined), 15);
   assert.equal(reviewRoundLimit("codex", "7"), 7);
@@ -436,9 +438,13 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
   );
   assert.deepEqual(
     codexReviewPreferencesFromToml(
-      'model = "gpt-base"\nmodel_reasoning_effort = "high"\ndeveloper_instructions = "ignore"',
+      'model = "gpt-base"\nreview_model = "gpt-review"\nmodel_reasoning_effort = "high"\ndeveloper_instructions = "ignore"',
     ),
-    { model: "gpt-base", model_reasoning_effort: "high" },
+    {
+      model: "gpt-base",
+      review_model: "gpt-review",
+      model_reasoning_effort: "high",
+    },
   );
   assert.deepEqual(
     codexReviewPreferencesFromToml(
@@ -506,10 +512,12 @@ test("Codex config reads reject oversized and non-regular inputs", (t) => {
 test("Codex feature probing adapts to supported flags and fails closed", () => {
   const parsed = parseCodexFeatureList(`
 hooks                              stable             true
+codex_hooks                        stable             true
 apps                               stable             true
 multi_agent                        stable             true
 `);
   assert.equal(parsed.get("hooks"), true);
+  assert.equal(parsed.get("codex_hooks"), true);
   assert.equal(parsed.has("multi_agent_v2"), false);
 
   const calls = [];
@@ -522,6 +530,7 @@ multi_agent                        stable             true
       return new Map(
         [
           "hooks",
+          "codex_hooks",
           "apps",
           "multi_agent_mode",
           "collaboration_modes",
@@ -535,6 +544,7 @@ multi_agent                        stable             true
   );
   assert.deepEqual(disabled, [
     "hooks",
+    "codex_hooks",
     "apps",
     "multi_agent_mode",
     "collaboration_modes",
@@ -573,13 +583,13 @@ test("Codex feature probing keeps temporary config below Git state", () => {
         assert.equal(probeHome.startsWith(storage), true);
         assert.equal(existsSync(probeHome), true);
         return new Map([
-          ["hooks", !requested.includes("hooks")],
+          ["codex_hooks", !requested.includes("codex_hooks")],
           ["apps", !requested.includes("apps")],
           ["multi_agent", !requested.includes("multi_agent")],
         ]);
       },
     );
-    assert.deepEqual(disabled, ["hooks", "apps", "multi_agent"]);
+    assert.deepEqual(disabled, ["codex_hooks", "apps", "multi_agent"]);
     assert.equal(existsSync(probeHome), false);
   } finally {
     rmSync(storage, { recursive: true, force: true });
@@ -738,6 +748,25 @@ test("check-commit-message validates a proposed repair commit", (t) => {
   assert.equal(effectivePolicy.policy.mode, "override");
   assert.equal(effectivePolicy.policy.source, "CONTRIBUTING.md");
   assert.deepEqual(effectivePolicy.policy.overrides, ["subject"]);
+
+  for (const attributionBullet of [
+    "- Reviewed by Codex",
+    "- Address OpenCode review feedback",
+  ]) {
+    result = invoke(
+      directory,
+      env,
+      "check-commit-message",
+      "--subject",
+      "Preserve exact product test names",
+      "--body",
+      narrativeCommitBody.replace("- npm test -- retry", attributionBullet),
+      "--product-terms",
+      "The repository implements reviewer-provider behavior",
+    );
+    assert.equal(result.status, 2, `${attributionBullet}\n${result.stdout}`);
+    assert.match(result.stdout, /AI-workflow attribution/u);
+  }
 
   const longContinuation = `  --test-name-pattern="${"preserve exact provider evidence ".repeat(5).trim()}"`;
   result = invoke(
@@ -905,6 +934,28 @@ test("check-commit-message validates a proposed repair commit", (t) => {
   );
   assert.equal(result.status, 2);
   assert.match(result.stdout, /AI attribution trailer/u);
+
+  for (const trailer of [
+    "Signed-off-by: Codex",
+    "Tested-by: OpenCode",
+    "Pair-programmed-with: Claude",
+    "Co-authored-by: GPT-5",
+    "Reviewed-by: reviewer",
+  ]) {
+    result = invoke(
+      directory,
+      env,
+      "check-commit-message",
+      "--subject",
+      "Preserve terminal provider errors",
+      "--body",
+      `${narrativeCommitBody}\n\n${trailer}`,
+      "--product-terms",
+      "The repository implements reviewer-provider behavior",
+    );
+    assert.equal(result.status, 2, `${trailer}\n${result.stdout}`);
+    assert.match(result.stdout, /AI attribution trailer/u);
+  }
 
   result = invoke(
     directory,

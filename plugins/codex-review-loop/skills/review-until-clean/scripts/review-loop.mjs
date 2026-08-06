@@ -34,6 +34,7 @@ const MAX_CODEX_CONFIG_BYTES = 1024 * 1024;
 const DEFAULT_COMMIT_SECTIONS = ["Failure", "Change", "Verification"];
 const CODEX_REVIEW_DISABLED_FEATURES = [
   "hooks",
+  "codex_hooks",
   "apps",
   "plugins",
   "multi_agent",
@@ -992,7 +993,7 @@ export function codexReviewPreferencesFromToml(
     );
     if (
       parts?.length === 1 &&
-      ["model", "model_reasoning_effort"].includes(parts[0])
+      ["model", "review_model", "model_reasoning_effort"].includes(parts[0])
     ) {
       preferences[parts[0]] = tomlStringValue(record.value ?? "", source);
     }
@@ -1448,7 +1449,8 @@ export function codexReviewArgs(
     "-c",
     codexProjectUntrustedOverride(reviewConfig.root ?? process.cwd()),
   ];
-  if (preferences.model) args.push("--model", preferences.model);
+  const reviewModel = preferences.review_model ?? preferences.model;
+  if (reviewModel) args.push("--model", reviewModel);
   if (preferences.model_reasoning_effort) {
     args.push(
       "-c",
@@ -2032,7 +2034,7 @@ const WORKFLOW_ATTRIBUTION_PATTERNS = [
   /\b(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?review(?:er)?\s+(?:asked|requested|required|suggested|said|recommended|instructed|flagged|identified)\b/iu,
   /\b(?:(?:an?|the)\s+)?(?:(?:ai|llm)(?:\s+review(?:er)?)?|review(?:er)?)\s+(?:found|identified|reported|flagged|raised|caught|suggested|requested|required)\b/iu,
   /\b(?:found|identified|reported|flagged|raised|caught|suggested|requested|required)\s+(?:by|during|in|from|through)\s+(?:(?:an?|the)\s+)?(?:(?:ai|llm)(?:\s+review(?:er)?)?|review(?:er)?)\b/iu,
-  /\b(?:address(?:es|ed|ing)?|appl(?:y|ies|ied|ying)|fix(?:es|ed|ing)?|resolv(?:e|es|ed|ing)|handl(?:e|es|ed|ing)|incorporat(?:e|es|ed|ing)|implement(?:s|ed|ing)?|clos(?:e|es|ed|ing)|clear(?:s|ed|ing)?|tackl(?:e|es|ed|ing)|satisf(?:y|ies|ied|ying))\s+(?:the\s+)?(?:(?:ai|llm)(?:\s+review(?:er)?)?|review(?:er)?)\s+(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance)\b/iu,
+  /\b(?:address(?:es|ed|ing)?|appl(?:y|ies|ied|ying)|fix(?:es|ed|ing)?|resolv(?:e|es|ed|ing)|handl(?:e|es|ed|ing)|incorporat(?:e|es|ed|ing)|implement(?:s|ed|ing)?|clos(?:e|es|ed|ing)|clear(?:s|ed|ing)?|tackl(?:e|es|ed|ing)|satisf(?:y|ies|ied|ying))\s+(?:the\s+)?(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+review(?:er)?|(?:ai|llm)(?:\s+review(?:er)?)?|review(?:er)?)\s+(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance)\b/iu,
   /\b(?:ai|llm)[ -]?(?:generated|assisted|reviewed|suggested)\b/iu,
   /\breview(?:er)?[ -]?round\s*#?\d+\b/iu,
 ];
@@ -2073,10 +2075,17 @@ function commitSection(body, name) {
 
 function isVerbatimVerificationCommand(line) {
   const trimmed = line.trim();
+  const bullet = trimmed.match(/^[-*]\s+(.+)/u);
   return (
-    /^[-*]\s+\S/u.test(trimmed) ||
+    (bullet && !startsWithWorkflowAttribution(bullet[1])) ||
     /^\$\s+\S/u.test(trimmed) ||
     /^`[^`]+`$/u.test(trimmed)
+  );
+}
+
+function startsWithWorkflowAttribution(text) {
+  return WORKFLOW_ATTRIBUTION_PATTERNS.some(
+    (pattern) => pattern.exec(text)?.index === 0,
   );
 }
 
@@ -2161,7 +2170,7 @@ function inspectCommitMessageWithPolicy(subject, body, options) {
     );
   }
   if (
-    /^(?:co-authored-by|reviewed-by|assisted-by|generated-by):.*(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode|\bai\b|\bllm\b)/imu.test(
+    /^(?:[-*]\s+)?[A-Za-z0-9][A-Za-z0-9-]*-(?:by|with):.*\b(?:codex|claude|gemini|chatgpt|gpt(?:-\d+(?:\.\d+)*)?|openai|anthropic|opencode|ai|llm|reviewer)\b/imu.test(
       body,
     )
   ) {
