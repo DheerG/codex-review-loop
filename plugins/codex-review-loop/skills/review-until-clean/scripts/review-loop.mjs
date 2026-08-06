@@ -276,34 +276,30 @@ function executableOnPath(name, env = process.env) {
   return null;
 }
 
-function availableProviders(env = process.env, codexContext = undefined) {
-  let codex = false;
-  if (executableOnPath("codex", env)) {
-    try {
-      codexFeaturesForReview(
-        {
-          root: codexContext?.root ?? process.cwd(),
-          isolateCodexConfig: Boolean(codexContext?.isolateCodexConfig),
-        },
-        env,
-        codexContext?.storage,
-      );
-      if (codexContext?.root) {
-        codexMcpServersForReview(
-          {
-            root: codexContext.root,
-            isolateCodexConfig: Boolean(codexContext.isolateCodexConfig),
-          },
-          env,
-        );
-      }
-      codex = true;
-    } catch {
-      codex = false;
-    }
+function codexAvailability(env, context = undefined) {
+  if (!executableOnPath("codex", env)) {
+    return { available: false, reason: "executable not found" };
   }
+  const state = {
+    root: context?.root ?? process.cwd(),
+    isolateCodexConfig: Boolean(context?.isolateCodexConfig),
+  };
+  try {
+    codexFeaturesForReview(state, env, context?.storage);
+    codexMcpServersForReview(state, env);
+    return { available: true };
+  } catch (error) {
+    return { available: false, reason: error.message };
+  }
+}
+
+function availableProviders(
+  env = process.env,
+  codexContext = undefined,
+  codexStatus = codexAvailability(env, codexContext),
+) {
   return {
-    codex,
+    codex: codexStatus.available,
     gemini: Boolean(executableOnPath("gemini", env)),
     claude: Boolean(executableOnPath("claude", env)),
     opencode: Boolean(executableOnPath("opencode", env)),
@@ -1825,12 +1821,16 @@ function finishCommand(repo, options) {
 }
 
 function doctorCommand(env) {
-  const providers = availableProviders(env);
+  const codexStatus = codexAvailability(env);
+  const providers = availableProviders(env, undefined, codexStatus);
   return {
     status: Object.values(providers).some(Boolean) ? "ready" : "unavailable",
     node: process.version,
     platform: `${process.platform}/${process.arch}`,
     providers,
+    providerDiagnostics: {
+      codex: codexStatus.reason ?? "ready",
+    },
     customProviderVariable: "CODEX_REVIEW_LOOP_PROVIDER_COMMAND_JSON",
     script: SKILL_SCRIPT,
   };

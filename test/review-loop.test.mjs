@@ -417,6 +417,24 @@ test("isolated Codex feature probing keeps temporary config below Git state", ()
   }
 });
 
+test("doctor reports Codex availability from the safety preflight", () => {
+  const result = execute(process.execPath, [cli, "doctor", "--json"], root, {
+    ...process.env,
+    CODEX_REVIEW_LOOP_PROVIDER_COMMAND_JSON: JSON.stringify([
+      process.execPath,
+      "--version",
+    ]),
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const report = JSON.parse(result.stdout);
+  assert.equal(typeof report.providers.codex, "boolean");
+  assert.equal(typeof report.providerDiagnostics.codex, "string");
+  assert.equal(
+    report.providers.codex,
+    report.providerDiagnostics.codex === "ready",
+  );
+});
+
 test("the reviewer treats commit messages as untrusted non-review context", () => {
   const prompt = reviewPrompt(
     {
