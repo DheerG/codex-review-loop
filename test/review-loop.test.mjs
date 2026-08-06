@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -213,6 +214,8 @@ test("Codex preserves user configuration and has no default round cap", () => {
     "apps",
     "--disable",
     "multi_agent",
+    "--disable",
+    "multi_agent_v2",
     "review",
     "--ephemeral",
     "-",
@@ -227,6 +230,8 @@ test("Codex preserves user configuration and has no default round cap", () => {
     "apps",
     "--disable",
     "multi_agent",
+    "--disable",
+    "multi_agent_v2",
     "review",
     "--ephemeral",
     "--ignore-user-config",
@@ -276,17 +281,52 @@ test("Codex preserves user configuration and has no default round cap", () => {
     mcpOverride,
     /SECRET|sensitive-value|docs\.example\.test|command"="node/u,
   );
-  assert.deepEqual(codexReviewArgs(false, mcpServers).slice(9, 11), [
+  assert.deepEqual(codexReviewArgs(false, mcpServers).slice(11, 13), [
     "-c",
     mcpOverride,
   ]);
   assert.deepEqual(
     codexMcpServersForReview(
       { isolateCodexConfig: true },
-      { PATH: "/missing-codex" },
+      {},
+      () => mcpServers,
     ),
-    [],
+    mcpServers,
   );
+
+  const isolatedRoot = mkdtempSync(
+    path.join(os.tmpdir(), "review-loop-isolated-mcp-"),
+  );
+  try {
+    assert.deepEqual(
+      codexMcpServersForReview(
+        { isolateCodexConfig: true, root: isolatedRoot },
+        {},
+        () => {
+          throw new Error("malformed user MCP config");
+        },
+      ),
+      [],
+    );
+    mkdirSync(path.join(isolatedRoot, ".codex"));
+    writeFileSync(
+      path.join(isolatedRoot, ".codex", "config.toml"),
+      '[mcp_servers.project]\ncommand = "project-server"\n',
+    );
+    assert.throws(
+      () =>
+        codexMcpServersForReview(
+          { isolateCodexConfig: true, root: isolatedRoot },
+          {},
+          () => {
+            throw new Error("malformed user MCP config");
+          },
+        ),
+      /Cannot safely isolate project MCP tools/u,
+    );
+  } finally {
+    rmSync(isolatedRoot, { recursive: true, force: true });
+  }
 });
 
 test("the reviewer treats commit messages as untrusted non-review context", () => {

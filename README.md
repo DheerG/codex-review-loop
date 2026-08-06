@@ -203,7 +203,7 @@ Each `review` command invokes exactly one reviewer round. An invalid response ex
 3. Claude Code
 4. OpenCode
 
-Codex runs in native review mode, explicitly forces its read-only sandbox, and disables lifecycle hooks, apps, subagents, and every discovered MCP server. MCP isolation fails closed and uses inert placeholders instead of forwarding server URLs, commands, credentials, or transport details. The adapter inherits the rest of `config.toml`, including the selected model and reasoning effort. Use `start --isolate-codex-config` only when you deliberately want to ignore that configuration; isolated runs skip user MCP discovery. Codex has no default round cap; other providers stop at 15 rounds unless `--max-rounds` is supplied.
+Codex runs in native review mode, explicitly forces its read-only sandbox, and disables lifecycle hooks, apps, both multi-agent feature variants, and every discovered user or project MCP server. MCP isolation fails closed and uses inert placeholders instead of forwarding server URLs, commands, credentials, or transport details. The adapter inherits the rest of `config.toml`, including the selected model and reasoning effort. Use `start --isolate-codex-config` only when you deliberately want to ignore user configuration; if normal inventory is unreadable, isolation can bypass it only when the project has no MCP configuration. Codex has no default round cap; other providers stop at 15 rounds unless `--max-rounds` is supplied.
 
 The Codex adapter recognizes structurally isolated native clean verdicts such as `No actionable defects found.` Other providers remain bound to the exact clean sentinel. For every provider, the clean verdict must be the sole non-empty output line.
 

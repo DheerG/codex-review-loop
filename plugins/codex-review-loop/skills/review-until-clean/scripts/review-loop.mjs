@@ -444,10 +444,27 @@ function configuredCodexMcpServers(state, env) {
   }
 }
 
-export function codexMcpServersForReview(state, env) {
-  return state.isolateCodexConfig
-    ? []
-    : configuredCodexMcpServers(state, env);
+export function codexMcpServersForReview(
+  state,
+  env,
+  inventory = configuredCodexMcpServers,
+) {
+  try {
+    return inventory(state, env);
+  } catch (error) {
+    if (!state.isolateCodexConfig) throw error;
+    const projectConfig = path.join(state.root, ".codex", "config.toml");
+    if (
+      existsSync(projectConfig) &&
+      /\bmcp_servers\b/u.test(readFileSync(projectConfig, "utf8"))
+    ) {
+      throw new CliError(
+        "Cannot safely isolate project MCP tools while the user MCP inventory is unreadable.",
+        3,
+      );
+    }
+    return [];
+  }
 }
 
 export function codexReviewArgs(isolateUserConfig = false, mcpServers = []) {
@@ -462,6 +479,8 @@ export function codexReviewArgs(isolateUserConfig = false, mcpServers = []) {
     "apps",
     "--disable",
     "multi_agent",
+    "--disable",
+    "multi_agent_v2",
     ...(mcpOverride ? ["-c", mcpOverride] : []),
     "review",
     "--ephemeral",
