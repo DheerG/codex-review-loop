@@ -22,7 +22,7 @@ import { fileURLToPath } from "node:url";
 
 const PROVIDERS = ["auto", "codex", "gemini", "claude", "opencode", "custom"];
 const CLEAN_SENTINEL = "NO_IN_SCOPE_FUNCTIONAL_FINDINGS";
-const STATE_SCHEMA_VERSION = 2;
+const STATE_SCHEMA_VERSION = 3;
 const DEFAULT_FALLBACK_MAX_ROUNDS = 15;
 const DEFAULT_TIMEOUT_MS = 1_200_000;
 const MAX_CAPTURE_BYTES = 64 * 1024 * 1024;
@@ -126,9 +126,17 @@ function loadActive(repo) {
     throw new CliError("No active review loop. Start one with `start`.", 2);
   }
   const state = readJson(repo.activeFile);
-  if (state.schemaVersion === 1) {
+  if (![1, 2, STATE_SCHEMA_VERSION].includes(state.schemaVersion)) {
+    throw new CliError(`Unsupported state schema: ${state.schemaVersion}`, 2);
+  }
+  if (state.schemaVersion < STATE_SCHEMA_VERSION) {
+    const previousSchema = state.schemaVersion;
+    state.base = pinPersistedBase(repo.root, state);
     state.schemaVersion = STATE_SCHEMA_VERSION;
-    if (state.phase === "clean" || state.lastReview?.status === "clean") {
+    if (
+      previousSchema === 1 &&
+      (state.phase === "clean" || state.lastReview?.status === "clean")
+    ) {
       state.phase = "invalid";
       if (state.maxRounds !== null) {
         state.maxRounds = Math.max(state.maxRounds, state.round + 2);
@@ -142,9 +150,6 @@ function loadActive(repo) {
     }
     saveActive(repo, state);
     return state;
-  }
-  if (state.schemaVersion !== STATE_SCHEMA_VERSION) {
-    throw new CliError(`Unsupported state schema: ${state.schemaVersion}`, 2);
   }
   return state;
 }
@@ -199,6 +204,46 @@ function resolveBase(root, requested) {
     );
   }
   return git(root, ["rev-parse", "--verify", `${base}^{commit}`]).stdout.trim();
+}
+
+function pinPersistedBase(root, state) {
+  const base = normalizeRef(state.base);
+  const resolved = resolveBase(root, base);
+  if (base === resolved) return resolved;
+  if (base === "HEAD" && refExists(root, state.initialHead)) {
+    return resolveBase(root, state.initialHead);
+  }
+
+  const startedAt = new Date(state.startedAt);
+  if (!Number.isNaN(startedAt.valueOf())) {
+    const historical = git(
+      root,
+      [
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        `${base}@{${startedAt.toISOString()}}^{commit}`,
+      ],
+      { allowFailure: true },
+    );
+    if (historical.status === 0) return historical.stdout.trim();
+  }
+
+  const currentBranch = git(root, ["symbolic-ref", "--quiet", "HEAD"], {
+    allowFailure: true,
+  });
+  const fullBranch = currentBranch.stdout.trim();
+  if (
+    currentBranch.status === 0 &&
+    [fullBranch, fullBranch.replace(/^refs\/heads\//u, "")].includes(base) &&
+    refExists(root, state.initialHead)
+  ) {
+    return resolveBase(root, state.initialHead);
+  }
+  throw new CliError(
+    `Cannot safely recover the original commit for persisted comparison base ${base}. Finish this run explicitly and start a new one.`,
+    2,
+  );
 }
 
 function splitNull(value) {
@@ -761,6 +806,50 @@ export function codexSelectedLegacyProfileFromToml(
   return codexConfigRecords(contents, source).selectedLegacyProfile;
 }
 
+export function codexProjectTrustFromToml(
+  contents,
+  projectRoot,
+  source = "Codex config",
+) {
+  const expected = path.resolve(projectRoot);
+  let trust = null;
+  for (const record of codexConfigRecords(contents, source).records) {
+    if (
+      record.parts.length !== 3 ||
+      record.parts[0] !== "projects" ||
+      record.parts[2] !== "trust_level" ||
+      !path.isAbsolute(record.parts[1])
+    ) {
+      continue;
+    }
+    const configured = path.resolve(record.parts[1]);
+    const sameProject =
+      process.platform === "win32"
+        ? configured.toLowerCase() === expected.toLowerCase()
+        : configured === expected;
+    if (!sameProject) continue;
+    const value = tomlStringValue(record.value ?? "", source);
+    if (!["trusted", "untrusted"].includes(value)) {
+      throw new CliError(`Cannot parse project trust in ${source}.`, 3);
+    }
+    trust = value;
+  }
+  return trust;
+}
+
+export function codexProjectConfigIsTrusted(configs, projectRoot) {
+  let trust = null;
+  for (const config of configs) {
+    const configuredTrust = codexProjectTrustFromToml(
+      config.contents,
+      projectRoot,
+      config.file,
+    );
+    if (configuredTrust !== null) trust = configuredTrust;
+  }
+  return trust === "trusted";
+}
+
 function activeCodexRecordParts(record, options, localSelectedProfile) {
   if (record.parts[0] !== "profiles") return record.parts;
   const selectedProfile = Object.hasOwn(options, "selectedLegacyProfile")
@@ -942,7 +1031,6 @@ function configuredCodexMcpServers(state, env) {
     ...(state.isolateCodexConfig
       ? []
       : [path.join(codexHome(env), "config.toml")]),
-    path.join(state.root, ".codex", "config.toml"),
   ].filter(Boolean);
   const ordinaryConfigs = [];
   for (const file of ordinary) {
@@ -973,6 +1061,27 @@ function configuredCodexMcpServers(state, env) {
       contents: managedPreference,
       file: "managed Codex preferences",
     });
+  }
+
+  const projectConfig = path.join(state.root, ".codex", "config.toml");
+  if (
+    codexProjectConfigIsTrusted(
+      [...ordinaryConfigs, ...managedConfigs],
+      state.root,
+    ) &&
+    existsSync(projectConfig)
+  ) {
+    try {
+      ordinaryConfigs.push({
+        contents: readFileSync(projectConfig, "utf8"),
+        file: projectConfig,
+      });
+    } catch (error) {
+      throw new CliError(
+        `Cannot safely read Codex MCP configuration at ${projectConfig}: ${error.message}`,
+        3,
+      );
+    }
   }
 
   let selectedLegacyProfile = null;

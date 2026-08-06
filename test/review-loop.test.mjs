@@ -19,6 +19,8 @@ import {
   codexMcpDisableOverride,
   codexMcpNamesFromToml,
   codexMcpServersForReview,
+  codexProjectConfigIsTrusted,
+  codexProjectTrustFromToml,
   codexReviewArgs,
   codexSelectedLegacyProfileFromToml,
   inspectCommitMessage,
@@ -406,6 +408,38 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
       { legacyProfiles: true, selectedLegacyProfile },
     ),
     ["notify", "sandbox_mode"],
+  );
+  assert.equal(
+    codexProjectTrustFromToml(
+      'projects = { "/tmp/project" = { trust_level = "untrusted" } }',
+      "/tmp/project",
+    ),
+    "untrusted",
+  );
+  assert.equal(
+    codexProjectTrustFromToml(
+      '[projects."/tmp/project"]\ntrust_level = "trusted"',
+      "/tmp/project",
+    ),
+    "trusted",
+  );
+  assert.equal(
+    codexProjectConfigIsTrusted(
+      [
+        {
+          contents:
+            '[projects."/tmp/project"]\ntrust_level = "trusted"',
+          file: "system config",
+        },
+        {
+          contents:
+            '[projects."/tmp/project"]\ntrust_level = "untrusted"',
+          file: "user config",
+        },
+      ],
+      "/tmp/project",
+    ),
+    false,
   );
 });
 
@@ -910,8 +944,24 @@ process.stdin.on("end", () => {
   assert.equal(result.status, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).state.base, originalHead);
 
+  const storage = git(
+    directory,
+    "rev-parse",
+    "--path-format=absolute",
+    "--git-path",
+    "codex-review-loop",
+  );
+  const activeFile = path.join(storage, "active.json");
+  const legacy = JSON.parse(readFileSync(activeFile, "utf8"));
+  legacy.schemaVersion = 2;
+  legacy.base = "HEAD";
+  writeFileSync(activeFile, `${JSON.stringify(legacy, null, 2)}\n`);
+
   git(directory, "add", "app.js");
   git(directory, "commit", "-qm", "Update exported value");
+  result = invoke(directory, env, "status");
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).state.base, originalHead);
   result = invoke(directory, env, "review");
   assert.equal(result.status, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).status, "clean");
