@@ -528,15 +528,17 @@ test("isolated Codex feature probing keeps temporary config below Git state", ()
 
 test("doctor reports Codex availability from the target safety preflight", (t) => {
   const { directory, provider } = repositoryFixture(t);
+  const nested = path.join(directory, "nested");
+  mkdirSync(nested);
   const result = execute(
     process.execPath,
-    [cli, "doctor", "--cwd", directory, "--json"],
+    [cli, "doctor", "--cwd", nested, "--json"],
     root,
     reviewEnvironment(provider, "unused"),
   );
   assert.equal(result.status, 0, result.stderr);
   const report = JSON.parse(result.stdout);
-  assert.equal(report.cwd, directory);
+  assert.equal(report.cwd, git(directory, "rev-parse", "--show-toplevel"));
   assert.equal(typeof report.providers.codex, "boolean");
   assert.equal(typeof report.providerDiagnostics.codex, "string");
   assert.equal(
@@ -1043,6 +1045,52 @@ test("stopped finish archives an unmigratable legacy run", (t) => {
   assert.equal(finished.status, "finished");
   assert.match(archived.migrationError, /does not resolve|recover/u);
   assert.equal(existsSync(activeFile), false);
+});
+
+test("legacy base migration accepts object prefixes but rejects stale reflogs", (t) => {
+  const { directory, provider } = repositoryFixture(t);
+  const env = reviewEnvironment(provider, "unused");
+  const originalHead = git(directory, "rev-parse", "HEAD");
+  let result = invoke(
+    directory,
+    env,
+    "start",
+    "--provider",
+    "custom",
+    "--base",
+    "HEAD",
+    "--outcome",
+    "Update the exported value",
+  );
+  assert.equal(result.status, 0, result.stderr);
+
+  const storage = git(
+    directory,
+    "rev-parse",
+    "--path-format=absolute",
+    "--git-path",
+    "codex-review-loop",
+  );
+  const activeFile = path.join(storage, "active.json");
+  let legacy = JSON.parse(readFileSync(activeFile, "utf8"));
+  legacy.schemaVersion = 2;
+  legacy.base = originalHead.slice(0, 12);
+  writeFileSync(activeFile, `${JSON.stringify(legacy, null, 2)}\n`);
+
+  result = invoke(directory, env, "status");
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).state.base, originalHead);
+
+  legacy = JSON.parse(readFileSync(activeFile, "utf8"));
+  legacy.schemaVersion = 2;
+  legacy.base = "moving-base";
+  legacy.startedAt = "2000-01-01T00:00:00.000Z";
+  writeFileSync(activeFile, `${JSON.stringify(legacy, null, 2)}\n`);
+  git(directory, "branch", "moving-base", "HEAD");
+
+  result = invoke(directory, env, "status");
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /recover the original commit/u);
 });
 
 test("a clean result is bound to the reviewed snapshot", (t) => {

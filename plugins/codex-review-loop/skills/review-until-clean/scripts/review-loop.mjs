@@ -212,16 +212,47 @@ function resolveBase(root, requested) {
   return git(root, ["rev-parse", "--verify", `${base}^{commit}`]).stdout.trim();
 }
 
+function isUnambiguousObjectPrefix(root, value, resolved) {
+  if (!/^[0-9a-f]{4,64}$/iu.test(value)) return false;
+  const candidates = git(root, ["rev-parse", `--disambiguate=${value}`], {
+    allowFailure: true,
+  });
+  if (candidates.status !== 0) return false;
+  const objects = candidates.stdout.split(/\r?\n/u).filter(Boolean);
+  return objects.length === 1 && objects[0] === resolved;
+}
+
+function reflogCovers(root, ref, startedAt) {
+  const result = git(root, ["reflog", "show", "--format=%ct", ref], {
+    allowFailure: true,
+  });
+  if (result.status !== 0) return false;
+  const timestamps = result.stdout
+    .split(/\r?\n/u)
+    .filter(Boolean)
+    .map(Number)
+    .filter(Number.isFinite);
+  return (
+    timestamps.length > 0 &&
+    Math.min(...timestamps) <= Math.floor(startedAt.valueOf() / 1_000)
+  );
+}
+
 function pinPersistedBase(root, state) {
   const base = normalizeRef(state.base);
   const resolved = resolveBase(root, base);
-  if (base === resolved) return resolved;
+  if (base === resolved || isUnambiguousObjectPrefix(root, base, resolved)) {
+    return resolved;
+  }
   if (base === "HEAD" && refExists(root, state.initialHead)) {
     return resolveBase(root, state.initialHead);
   }
 
   const startedAt = new Date(state.startedAt);
-  if (!Number.isNaN(startedAt.valueOf())) {
+  if (
+    !Number.isNaN(startedAt.valueOf()) &&
+    reflogCovers(root, base, startedAt)
+  ) {
     const historical = git(
       root,
       [
@@ -2028,7 +2059,12 @@ function finishCommand(repo, options) {
 }
 
 function doctorCommand(env, cwd = process.cwd()) {
-  const root = path.resolve(cwd);
+  const requested = path.resolve(cwd);
+  const topLevel = git(requested, ["rev-parse", "--show-toplevel"], {
+    allowFailure: true,
+  });
+  const root =
+    topLevel.status === 0 ? path.resolve(topLevel.stdout.trim()) : requested;
   const context = { root };
   const codexStatus = codexAvailability(env, context);
   const providers = availableProviders(env, context, codexStatus);

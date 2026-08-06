@@ -190,7 +190,7 @@ node plugins/codex-review-loop/skills/review-until-clean/scripts/review-loop.mjs
   start --outcome "Preserve the public API while fixing retries"
 ```
 
-`doctor` reports provider availability after the same Codex isolation preflight used by `start`, honors `--cwd`, and includes a Codex rejection reason when managed configuration is unsafe. `finish --reason clean` rejects an unclean last result or a changed post-review snapshot. It never scans or rewrites commit history after a clean review.
+`doctor` reports provider availability after the same Codex isolation preflight used by `start`, resolves a repository subdirectory to its Git top level, honors `--cwd` outside repositories, and includes a Codex rejection reason when managed configuration is unsafe. `finish --reason clean` rejects an unclean last result or a changed post-review snapshot. It never scans or rewrites commit history after a clean review.
 
 Each `review` command invokes exactly one reviewer round. `start` resolves the selected comparison ref to an immutable commit before storing the run, so later repair commits cannot move its boundary. Older active runs resolve their stored ref during migration and fail closed if its original commit cannot be recovered; `finish --reason stopped` remains available to archive that state. An invalid response exits nonzero because it is not clean; inspect the returned status before retrying. Do not attach a shell `||` fallback to `review`, because that can mistake an invalid result for a failed invocation and consume an unintended second round.
 
