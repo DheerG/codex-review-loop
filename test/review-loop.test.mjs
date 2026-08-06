@@ -397,6 +397,9 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "Resolve review feedback",
     "Resolved reviewer comments",
     "Incorporating review findings",
+    "Apply reviewer suggestions",
+    "Handle review requests",
+    "Implement reviewer recommendations",
     "Record review round 2",
     "Codex-assisted retry fix",
     "Reviewed by Codex",
@@ -417,6 +420,22 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     assert.equal(result.status, 2, `${subject}\n${result.stdout}`);
     assert.match(result.stdout, /review workflow|AI-workflow attribution/u);
   }
+
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
+    "Preserve retries\n\nCo-authored-by: Codex",
+    "--policy",
+    "User instruction: omit commit bodies",
+    "--policy-overrides",
+    "body",
+    "--product-terms",
+    "The repository ships reviewer integrations",
+  );
+  assert.equal(result.status, 2);
+  assert.match(result.stdout, /single line/u);
 
 });
 

@@ -882,15 +882,15 @@ async function reviewCommand(repo, env) {
 }
 
 const PRODUCT_TERM_PATTERNS = [
-  /\b(?:codex|claude|gemini|chatgpt|openai|anthropic)\b.{0,50}\b(?:review|reviewer|feedback|findings?|comments?|loop|suggestions?)\b/iu,
-  /\b(?:review|reviewer|feedback|findings?|comments?|loop|suggestions?)\b.{0,50}\b(?:codex|claude|gemini|chatgpt|openai|anthropic)\b/iu,
+  /\b(?:codex|claude|gemini|chatgpt|openai|anthropic)\b.{0,50}\b(?:review|reviewer|feedback|findings?|comments?|loop|suggestions?|requests?|recommendations?|instructions?|guidance)\b/iu,
+  /\b(?:review|reviewer|feedback|findings?|comments?|loop|suggestions?|requests?|recommendations?|instructions?|guidance)\b.{0,50}\b(?:codex|claude|gemini|chatgpt|openai|anthropic)\b/iu,
 ];
 
 const WORKFLOW_ATTRIBUTION_PATTERNS = [
   /\b(?:reviewed|generated|suggested|assisted)\s+(?:by|with)\s+(?:codex|claude|gemini|chatgpt|openai|anthropic)\b/iu,
   /\b(?:codex|claude|gemini|chatgpt|openai|anthropic)[\s-]+(?:reviewed|generated|suggested|assisted)\b/iu,
-  /\b(?:found|identified|reported|flagged|raised|caught|suggested|requested|required)\s+(?:by|during|in|from|through)\s+(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?(?:review|reviewer|feedback|findings?|comments?)\b/iu,
-  /\b(?:after|following|per|during|from|in\s+response\s+to)\s+(?:(?:the|a)\s+)?(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?(?:review|reviewer|feedback|findings?|comments?)\b/iu,
+  /\b(?:found|identified|reported|flagged|raised|caught|suggested|requested|required)\s+(?:by|during|in|from|through)\s+(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?(?:review|reviewer|feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance)\b/iu,
+  /\b(?:after|following|per|during|from|in\s+response\s+to)\s+(?:(?:the|a)\s+)?(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?(?:review|reviewer|feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance)\b/iu,
   /\b(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+(?:found|identified|reported|flagged|raised|caught|suggested|requested|required)\b/iu,
   /\b(?:ai|llm)[ -]?(?:generated|assisted|reviewed|suggested)\b/iu,
   /\breview(?:er)?[ -]?round\s*#?\d+\b/iu,
@@ -935,8 +935,11 @@ function inspectCommitMessageWithPolicy(subject, body, options) {
   if (!subject.trim()) {
     issues.push("subject is empty");
   }
+  if (/[\r\n]/u.test(subject)) {
+    issues.push("subject must be a single line");
+  }
   if (
-    /\b(?:address(?:es|ed|ing)?|appl(?:y|ies|ied|ying)|fix(?:es|ed|ing)?|resolv(?:e|es|ed|ing)|handl(?:e|es|ed|ing)|incorporat(?:e|es|ed|ing)|implement(?:s|ed|ing)?|clos(?:e|es|ed|ing)|clear(?:s|ed|ing)?|tackl(?:e|es|ed|ing)|satisf(?:y|ies|ied|ying))\s+(?:the\s+)?(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?review(?:er)?\s+(?:feedback|findings?|comments?)\b/iu.test(
+    /\b(?:address(?:es|ed|ing)?|appl(?:y|ies|ied|ying)|fix(?:es|ed|ing)?|resolv(?:e|es|ed|ing)|handl(?:e|es|ed|ing)|incorporat(?:e|es|ed|ing)|implement(?:s|ed|ing)?|clos(?:e|es|ed|ing)|clear(?:s|ed|ing)?|tackl(?:e|es|ed|ing)|satisf(?:y|ies|ied|ying))\s+(?:the\s+)?(?:(?:codex|claude|gemini|chatgpt|openai|anthropic)\s+)?review(?:er)?\s+(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance)\b/iu.test(
       subject,
     ) ||
     /\b(?:review(?:er)?[ -]?round|codex fixes|claude fixes|ai review)\b/iu.test(
@@ -949,10 +952,10 @@ function inspectCommitMessageWithPolicy(subject, body, options) {
     issues.push("message contains reviewer or AI-workflow attribution");
   }
   if (
-    /\b(?:to satisfy|in response to|as requested by|per|following)\s+(?:the\s+)?(?:review|reviewer|feedback|findings?|comments?)\b/iu.test(
+    /\b(?:to satisfy|in response to|as requested by|per|following)\s+(?:the\s+)?(?:review|reviewer|feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance)\b/iu.test(
       body,
     ) ||
-    /\b(?:review|reviewer|feedback|findings?|comments?)\s+(?:asked|requested|required|suggested|said)\b/iu.test(
+    /\b(?:review|reviewer|feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance)\s+(?:asked|requested|required|suggested|said)\b/iu.test(
       body,
     )
   ) {
