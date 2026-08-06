@@ -4,7 +4,7 @@ The engine selects the first installed provider in this order when `--provider a
 
 | Provider | Command | Read-only mechanism |
 | --- | --- | --- |
-| `codex` | Isolated `codex exec review` invocation | Read-only sandbox; hooks, apps, subagents, and discovered MCP servers disabled |
+| `codex` | Isolated `codex exec review` invocation | Read-only sandbox; hooks, apps, plugins, supported subagent features, and discovered MCP servers disabled and verified |
 | `gemini` | `gemini -p ... --output-format json` | Explicit review-only prompt |
 | `claude` | `claude -p ... --permission-mode plan --tools Bash,Read,Glob,Grep` | Plan permission mode and read tools |
 | `opencode` | `opencode run --agent plan ...` | Plan agent |
@@ -12,7 +12,7 @@ The engine selects the first installed provider in this order when `--provider a
 
 Use `doctor` to see which binaries are available. Provider choice is stored in the active run; a saved preference never proves that a binary or account is currently available.
 
-The Codex adapter inherits the user's configured model and reasoning effort so review depth matches direct Codex use. Before each round it inventories effective user and project MCP servers and supplies inert disabled definitions for every enabled server without forwarding original URLs, commands, credentials, or transport details. It also disables lifecycle hooks, apps, both multi-agent feature variants, forces the native read-only sandbox, and uses `--ephemeral` to prevent a saved session. If normal inventory is unreadable, `start --isolate-codex-config` may bypass it only when the project has no MCP configuration; otherwise the round fails closed. Authentication is still reused.
+The Codex adapter inherits the user's configured model and reasoning effort so review depth matches direct Codex use. Before each round it statically reads ordinary user, system, and project TOML for MCP server names and supplies disabled definitions without starting a transport, contacting an endpoint, or forwarding original URLs, commands, credentials, or transport details. MCP definitions in higher-precedence managed defaults fail closed. It feature-probes the installed CLI, disables lifecycle hooks, apps, plugins, and every supported multi-agent variant, then verifies their effective states so managed defaults cannot silently re-enable them. Unknown newer feature names are omitted for compatibility with older Codex releases. The adapter also forces the native read-only sandbox and uses `--ephemeral` to prevent a saved session. `start --isolate-codex-config` skips user config while keeping its temporary feature-probe home below the repository's Git runtime-state directory. Authentication is still reused.
 
 Codex keeps its native review output. An explicit native verdict such as `No actionable defects found.` or `No in-scope functional findings.` is clean only when it is the sole non-empty output line. Other providers use the exact clean sentinel under the same isolated-line rule.
 

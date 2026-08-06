@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -12,11 +13,14 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  codexFeaturesForReview,
   codexMcpDisableOverride,
+  codexMcpNamesFromToml,
   codexMcpServersForReview,
   codexReviewArgs,
   inspectCommitMessage,
   parseReview,
+  parseCodexFeatureList,
   reviewPrompt,
   reviewRoundLimit,
 } from "../plugins/codex-review-loop/skills/review-until-clean/scripts/review-loop.mjs";
@@ -213,6 +217,8 @@ test("Codex preserves user configuration and has no default round cap", () => {
     "--disable",
     "apps",
     "--disable",
+    "plugins",
+    "--disable",
     "multi_agent",
     "--disable",
     "multi_agent_v2",
@@ -229,6 +235,8 @@ test("Codex preserves user configuration and has no default round cap", () => {
     "--disable",
     "apps",
     "--disable",
+    "plugins",
+    "--disable",
     "multi_agent",
     "--disable",
     "multi_agent_v2",
@@ -241,47 +249,19 @@ test("Codex preserves user configuration and has no default round cap", () => {
   assert.equal(reviewRoundLimit("custom", undefined), 15);
   assert.equal(reviewRoundLimit("codex", "7"), 7);
 
-  const mcpServers = [
-    {
-      name: "__proto__",
-      enabled: true,
-      transport: {
-        type: "stdio",
-        command: "dangerous-server",
-      },
-    },
-    {
-      name: "docs server",
-      enabled: true,
-      transport: {
-        type: "streamable_http",
-        url: "https://docs.example.test/mcp",
-        bearer_token_env_var: "SECRET_TOKEN",
-      },
-    },
-    {
-      name: "local",
-      enabled: true,
-      transport: {
-        type: "stdio",
-        command: "node",
-        args: ["server.mjs", "--secret", "sensitive-value"],
-        env: { SECRET: "sensitive-value" },
-      },
-    },
-  ];
+  const mcpServers = ["__proto__", "docs server", "local"];
   const mcpOverride = codexMcpDisableOverride(mcpServers);
   assert.match(mcpOverride, /^mcp_servers=/u);
   assert.match(mcpOverride, /"docs server"/u);
   assert.match(mcpOverride, /"__proto__"/u);
   assert.match(mcpOverride, /"enabled"=false/u);
-  assert.match(mcpOverride, /codex-review-loop-disabled-mcp/u);
-  assert.match(mcpOverride, /https:\/\/disabled\.invalid\/mcp/u);
   assert.doesNotMatch(
     mcpOverride,
-    /SECRET|sensitive-value|docs\.example\.test|command"="node/u,
+    /SECRET|sensitive-value|docs\.example\.test|command|url/u,
   );
-  assert.deepEqual(codexReviewArgs(false, mcpServers).slice(11, 13), [
+  const args = codexReviewArgs(false, mcpServers);
+  const overrideIndex = args.indexOf("-c");
+  assert.deepEqual(args.slice(overrideIndex, overrideIndex + 2), [
     "-c",
     mcpOverride,
   ]);
@@ -294,38 +274,115 @@ test("Codex preserves user configuration and has no default round cap", () => {
     mcpServers,
   );
 
-  const isolatedRoot = mkdtempSync(
-    path.join(os.tmpdir(), "review-loop-isolated-mcp-"),
+  assert.throws(
+    () =>
+      codexMcpServersForReview({}, {}, () => {
+        throw new Error("unreadable managed MCP config");
+      }),
+    /unreadable managed MCP config/u,
   );
-  try {
-    assert.deepEqual(
-      codexMcpServersForReview(
-        { isolateCodexConfig: true, root: isolatedRoot },
+});
+
+test("Codex MCP discovery reads TOML without probing configured transports", () => {
+  const config = `
+developer_instructions = """
+[mcp_servers.not_a_real_server]
+"""
+
+[mcp_servers."docs server"]
+url = "https://docs.example.test/mcp"
+
+[profiles.legacy.mcp_servers.'__proto__']
+command = "dangerous-server"
+
+[mcp_servers]
+local = { command = "node", args = ["server.mjs", "--secret"] }
+`;
+  assert.deepEqual(codexMcpNamesFromToml(config), [
+    "__proto__",
+    "docs server",
+    "local",
+  ]);
+  assert.deepEqual(
+    codexMcpNamesFromToml(
+      'mcp_servers = { "inline server" = { url = "https://example.test" }, local.command = "node" }',
+    ),
+    ["inline server", "local"],
+  );
+  assert.throws(
+    () => codexMcpNamesFromToml('mcp_servers = "unknown"'),
+    /Cannot safely inventory inline mcp_servers/u,
+  );
+});
+
+test("Codex feature probing adapts to supported flags and fails closed", () => {
+  const parsed = parseCodexFeatureList(`
+hooks                              stable             true
+apps                               stable             true
+multi_agent                        stable             true
+`);
+  assert.equal(parsed.get("hooks"), true);
+  assert.equal(parsed.has("multi_agent_v2"), false);
+
+  const calls = [];
+  const disabled = codexFeaturesForReview(
+    { root: "/tmp/repository", isolateCodexConfig: false },
+    {},
+    undefined,
+    (_root, _env, requested = []) => {
+      calls.push(requested);
+      return new Map(
+        ["hooks", "apps", "multi_agent"].map((feature) => [
+          feature,
+          !requested.includes(feature),
+        ]),
+      );
+    },
+  );
+  assert.deepEqual(disabled, ["hooks", "apps", "multi_agent"]);
+  assert.deepEqual(calls[1], disabled);
+  assert.doesNotMatch(codexReviewArgs(false, [], disabled).join(" "), /multi_agent_v2/u);
+
+  assert.throws(
+    () =>
+      codexFeaturesForReview(
+        { root: "/tmp/repository", isolateCodexConfig: false },
         {},
-        () => {
-          throw new Error("malformed user MCP config");
-        },
+        undefined,
+        (_root, _env, requested = []) =>
+          new Map([
+            ["hooks", true],
+            ["apps", !requested.includes("apps")],
+            ["multi_agent", !requested.includes("multi_agent")],
+          ]),
       ),
-      [],
+    /Cannot safely disable managed Codex features: hooks/u,
+  );
+});
+
+test("isolated Codex feature probing keeps temporary config below Git state", () => {
+  const storage = mkdtempSync(path.join(os.tmpdir(), "review-loop-git-state-"));
+  let probeHome;
+  try {
+    const disabled = codexFeaturesForReview(
+      { root: "/tmp/repository", isolateCodexConfig: true },
+      { CODEX_HOME: "/unreadable/user/config" },
+      storage,
+      (_root, env, requested = []) => {
+        probeHome = env.CODEX_HOME;
+        assert.equal(probeHome.startsWith(storage), true);
+        assert.equal(existsSync(probeHome), true);
+        return new Map([
+          ["hooks", !requested.includes("hooks")],
+          ["apps", !requested.includes("apps")],
+          ["multi_agent", !requested.includes("multi_agent")],
+        ]);
+      },
     );
-    mkdirSync(path.join(isolatedRoot, ".codex"));
-    writeFileSync(
-      path.join(isolatedRoot, ".codex", "config.toml"),
-      '[mcp_servers.project]\ncommand = "project-server"\n',
-    );
-    assert.throws(
-      () =>
-        codexMcpServersForReview(
-          { isolateCodexConfig: true, root: isolatedRoot },
-          {},
-          () => {
-            throw new Error("malformed user MCP config");
-          },
-        ),
-      /Cannot safely isolate project MCP tools/u,
-    );
+    assert.deepEqual(disabled, ["hooks", "apps", "multi_agent"]);
+    assert.equal(existsSync(probeHome), false);
   } finally {
-    rmSync(isolatedRoot, { recursive: true, force: true });
+    rmSync(storage, { recursive: true, force: true });
   }
 });
 

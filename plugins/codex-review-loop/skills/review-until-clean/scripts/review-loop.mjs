@@ -8,6 +8,7 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   readlinkSync,
   renameSync,
@@ -26,6 +27,13 @@ const DEFAULT_FALLBACK_MAX_ROUNDS = 15;
 const DEFAULT_TIMEOUT_MS = 1_200_000;
 const MAX_CAPTURE_BYTES = 64 * 1024 * 1024;
 const DEFAULT_COMMIT_SECTIONS = ["Failure", "Change", "Verification"];
+const CODEX_REVIEW_DISABLED_FEATURES = [
+  "hooks",
+  "apps",
+  "plugins",
+  "multi_agent",
+  "multi_agent_v2",
+];
 const SKILL_SCRIPT = fileURLToPath(import.meta.url);
 
 class CliError extends Error {
@@ -268,9 +276,34 @@ function executableOnPath(name, env = process.env) {
   return null;
 }
 
-function availableProviders(env = process.env) {
+function availableProviders(env = process.env, codexContext = undefined) {
+  let codex = false;
+  if (executableOnPath("codex", env)) {
+    try {
+      codexFeaturesForReview(
+        {
+          root: codexContext?.root ?? process.cwd(),
+          isolateCodexConfig: Boolean(codexContext?.isolateCodexConfig),
+        },
+        env,
+        codexContext?.storage,
+      );
+      if (codexContext?.root) {
+        codexMcpServersForReview(
+          {
+            root: codexContext.root,
+            isolateCodexConfig: Boolean(codexContext.isolateCodexConfig),
+          },
+          env,
+        );
+      }
+      codex = true;
+    } catch {
+      codex = false;
+    }
+  }
   return {
-    codex: Boolean(executableOnPath("codex", env)),
+    codex,
     gemini: Boolean(executableOnPath("gemini", env)),
     claude: Boolean(executableOnPath("claude", env)),
     opencode: Boolean(executableOnPath("opencode", env)),
@@ -278,16 +311,21 @@ function availableProviders(env = process.env) {
   };
 }
 
-function chooseProvider(requested, env = process.env) {
+function chooseProvider(requested, env = process.env, codexContext = undefined) {
   if (!PROVIDERS.includes(requested)) {
     throw new CliError(
       `Unknown provider ${JSON.stringify(requested)}. Use ${PROVIDERS.join(", ")}.`,
       2,
     );
   }
-  const available = availableProviders(env);
   if (requested !== "auto") {
-    if (!available[requested]) {
+    const available =
+      requested === "codex"
+        ? availableProviders(env, codexContext).codex
+        : requested === "custom"
+          ? Boolean(env.CODEX_REVIEW_LOOP_PROVIDER_COMMAND_JSON)
+          : Boolean(executableOnPath(requested, env));
+    if (!available) {
       throw new CliError(
         `Provider ${requested} is not available. Run \`doctor\` for details.`,
         3,
@@ -295,6 +333,7 @@ function chooseProvider(requested, env = process.env) {
     }
     return requested;
   }
+  const available = availableProviders(env, codexContext);
   const selected = ["codex", "gemini", "claude", "opencode"].find(
     (provider) => available[provider],
   );
@@ -390,58 +429,338 @@ export function codexMcpDisableOverride(servers) {
   }
   const disabled = Object.create(null);
   for (const server of servers) {
-    if (!server?.enabled) continue;
-    if (typeof server.name !== "string" || !server.name) {
+    const name = typeof server === "string" ? server : server?.name;
+    if (typeof name !== "string" || !name) {
       throw new CliError("Codex MCP inventory contains an unnamed server.", 3);
     }
-    if (server.transport?.type === "stdio") {
-      if (typeof server.transport.command !== "string") {
-        throw new CliError(`Codex MCP server ${server.name} has no command.`, 3);
-      }
-      disabled[server.name] = {
-        enabled: false,
-        command: "codex-review-loop-disabled-mcp",
-      };
-    } else if (server.transport?.type === "streamable_http") {
-      if (typeof server.transport.url !== "string") {
-        throw new CliError(`Codex MCP server ${server.name} has no URL.`, 3);
-      }
-      disabled[server.name] = {
-        enabled: false,
-        url: "https://disabled.invalid/mcp",
-      };
-    } else {
-      throw new CliError(
-        `Codex MCP server ${server.name} has an unsupported transport.`,
-        3,
-      );
-    }
+    disabled[name] = { enabled: false };
   }
   return Object.keys(disabled).length > 0
     ? `mcp_servers=${tomlInlineValue(disabled)}`
     : null;
 }
 
-function configuredCodexMcpServers(state, env) {
-  const result = run("codex", ["mcp", "list", "--json"], {
-    cwd: state.root,
-    env,
-    allowFailure: true,
-  });
+function stripTomlComment(line) {
+  let quote = null;
+  let escaped = false;
+  for (let index = 0; index < line.length; index += 1) {
+    const character = line[index];
+    if (quote === '"') {
+      if (escaped) {
+        escaped = false;
+      } else if (character === "\\") {
+        escaped = true;
+      } else if (character === quote) {
+        quote = null;
+      }
+    } else if (quote === "'") {
+      if (character === quote) quote = null;
+    } else if (character === '"' || character === "'") {
+      quote = character;
+    } else if (character === "#") {
+      return line.slice(0, index);
+    }
+  }
+  return line;
+}
+
+function decodeTomlBasicKey(value, source) {
+  let decoded = "";
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index];
+    if (character !== "\\") {
+      decoded += character;
+      continue;
+    }
+    const escape = value[(index += 1)];
+    const escapes = {
+      b: "\b",
+      t: "\t",
+      n: "\n",
+      f: "\f",
+      r: "\r",
+      '"': '"',
+      "\\": "\\",
+    };
+    if (Object.hasOwn(escapes, escape)) {
+      decoded += escapes[escape];
+      continue;
+    }
+    if (escape === "u" || escape === "U") {
+      const digits = escape === "u" ? 4 : 8;
+      const hexadecimal = value.slice(index + 1, index + 1 + digits);
+      if (!new RegExp(`^[0-9a-f]{${digits}}$`, "iu").test(hexadecimal)) {
+        throw new CliError(`Cannot parse a quoted TOML key in ${source}.`, 3);
+      }
+      decoded += String.fromCodePoint(Number.parseInt(hexadecimal, 16));
+      index += digits;
+      continue;
+    }
+    throw new CliError(
+      `Cannot parse a quoted TOML key in ${source}.`,
+      3,
+    );
+  }
+  return decoded;
+}
+
+function parseTomlKeyPath(value, source) {
+  const parts = [];
+  let index = 0;
+  while (index < value.length) {
+    while (/\s/u.test(value[index] ?? "")) index += 1;
+    if (index >= value.length) break;
+    let part;
+    if (value[index] === '"' || value[index] === "'") {
+      const quote = value[index];
+      let escaped = false;
+      let end = index + 1;
+      for (; end < value.length; end += 1) {
+        if (quote === '"' && !escaped && value[end] === "\\") {
+          escaped = true;
+          continue;
+        }
+        if (!escaped && value[end] === quote) break;
+        escaped = false;
+      }
+      if (end >= value.length) {
+        throw new CliError(`Cannot parse a quoted TOML key in ${source}.`, 3);
+      }
+      const raw = value.slice(index + 1, end);
+      part = quote === '"' ? decodeTomlBasicKey(raw, source) : raw;
+      index = end + 1;
+    } else {
+      const match = value.slice(index).match(/^[A-Za-z0-9_-]+/u);
+      if (!match) {
+        throw new CliError(`Cannot parse a TOML key in ${source}.`, 3);
+      }
+      [part] = match;
+      index += part.length;
+    }
+    if (!part) throw new CliError(`TOML keys cannot be empty in ${source}.`, 3);
+    parts.push(part);
+    while (/\s/u.test(value[index] ?? "")) index += 1;
+    if (index >= value.length) break;
+    if (value[index] !== ".") {
+      throw new CliError(`Cannot parse a dotted TOML key in ${source}.`, 3);
+    }
+    index += 1;
+  }
+  if (parts.length === 0) {
+    throw new CliError(`Cannot parse an empty TOML key in ${source}.`, 3);
+  }
+  return parts;
+}
+
+function tomlAssignmentIndex(line) {
+  let quote = null;
+  let escaped = false;
+  for (let index = 0; index < line.length; index += 1) {
+    const character = line[index];
+    if (quote === '"') {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === quote) quote = null;
+    } else if (quote === "'") {
+      if (character === quote) quote = null;
+    } else if (character === '"' || character === "'") {
+      quote = character;
+    } else if (character === "=") {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function inlineTomlTableKeys(value, source) {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) {
+    throw new CliError(
+      `Cannot safely inventory inline mcp_servers in ${source}.`,
+      3,
+    );
+  }
+  const entries = [];
+  let start = 1;
+  let depth = 0;
+  let quote = null;
+  let escaped = false;
+  for (let index = 1; index < trimmed.length - 1; index += 1) {
+    const character = trimmed[index];
+    if (quote === '"') {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === quote) quote = null;
+      continue;
+    }
+    if (quote === "'") {
+      if (character === quote) quote = null;
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      quote = character;
+    } else if (character === "{" || character === "[") {
+      depth += 1;
+    } else if (character === "}" || character === "]") {
+      depth -= 1;
+    } else if (character === "," && depth === 0) {
+      entries.push(trimmed.slice(start, index));
+      start = index + 1;
+    }
+  }
+  entries.push(trimmed.slice(start, -1));
+  return entries
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .map((entry) => {
+      const equals = tomlAssignmentIndex(entry);
+      if (equals < 0) {
+        throw new CliError(
+          `Cannot safely inventory inline mcp_servers in ${source}.`,
+          3,
+        );
+      }
+      return parseTomlKeyPath(entry.slice(0, equals).trim(), source)[0];
+    });
+}
+
+function recordMcpNames(parts, value, names, source) {
+  for (let index = 0; index < parts.length; index += 1) {
+    if (parts[index] !== "mcp_servers") continue;
+    if (parts[index + 1]) {
+      names.add(parts[index + 1]);
+    } else if (value !== undefined) {
+      for (const name of inlineTomlTableKeys(value, source)) names.add(name);
+    }
+  }
+}
+
+export function codexMcpNamesFromToml(contents, source = "Codex config") {
+  const names = new Set();
+  let table = [];
+  let multiline = null;
+  for (const rawLine of contents.split(/\r?\n/u)) {
+    if (multiline) {
+      if (rawLine.includes(multiline)) multiline = null;
+      continue;
+    }
+    const line = stripTomlComment(rawLine).trim();
+    if (!line) continue;
+    if (line.startsWith("[")) {
+      const arrayTable = line.startsWith("[[");
+      const opener = arrayTable ? "[[" : "[";
+      const closer = arrayTable ? "]]" : "]";
+      if (!line.endsWith(closer)) {
+        throw new CliError(`Cannot parse a TOML table in ${source}.`, 3);
+      }
+      table = parseTomlKeyPath(
+        line.slice(opener.length, -closer.length).trim(),
+        source,
+      );
+      recordMcpNames(table, undefined, names, source);
+      continue;
+    }
+    const equals = tomlAssignmentIndex(line);
+    if (equals < 0) continue;
+    const key = parseTomlKeyPath(line.slice(0, equals).trim(), source);
+    const value = line.slice(equals + 1).trim();
+    recordMcpNames([...table, ...key], value, names, source);
+    for (const delimiter of ['"""', "'''"]) {
+      const start = value.indexOf(delimiter);
+      if (start >= 0 && value.indexOf(delimiter, start + 3) < 0) {
+        multiline = delimiter;
+      }
+    }
+  }
+  return [...names].sort();
+}
+
+function codexHome(env) {
+  return path.resolve(env.CODEX_HOME ?? path.join(os.homedir(), ".codex"));
+}
+
+function codexSystemConfig(env) {
+  if (process.platform !== "win32") return "/etc/codex/config.toml";
+  const programData = env.ProgramData ?? env.PROGRAMDATA;
+  return programData
+    ? path.join(programData, "OpenAI", "Codex", "config.toml")
+    : null;
+}
+
+function codexManagedConfig() {
+  return process.platform === "win32"
+    ? path.join(os.homedir(), ".codex", "managed_config.toml")
+    : "/etc/codex/managed_config.toml";
+}
+
+function codexManagedPreference(env) {
+  if (process.platform !== "darwin") return null;
+  const result = run(
+    "/usr/bin/defaults",
+    ["read", "com.openai.codex", "config_toml_base64"],
+    { env, allowFailure: true },
+  );
   if (result.status !== 0) {
+    if (/does not exist|domain .* not found/iu.test(result.stderr)) return null;
     throw new CliError(
-      "Cannot safely isolate Codex MCP tools: `codex mcp list --json` failed.",
+      "Cannot safely inspect managed Codex preferences for MCP servers.",
       3,
     );
   }
-  try {
-    return JSON.parse(result.stdout);
-  } catch (error) {
+  const encoded = result.stdout.trim().replace(/^"|"$/gu, "").replace(/\s/gu, "");
+  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(encoded)) {
+    throw new CliError("Managed Codex preferences contain invalid base64.", 3);
+  }
+  return Buffer.from(encoded, "base64").toString("utf8");
+}
+
+function configuredCodexMcpServers(state, env) {
+  const ordinary = [
+    codexSystemConfig(env),
+    ...(state.isolateCodexConfig
+      ? []
+      : [path.join(codexHome(env), "config.toml")]),
+    path.join(state.root, ".codex", "config.toml"),
+  ].filter(Boolean);
+  const names = new Set();
+  for (const file of ordinary) {
+    if (!existsSync(file)) continue;
+    let contents;
+    try {
+      contents = readFileSync(file, "utf8");
+    } catch (error) {
+      throw new CliError(
+        `Cannot safely read Codex MCP configuration at ${file}: ${error.message}`,
+        3,
+      );
+    }
+    for (const name of codexMcpNamesFromToml(contents, file)) names.add(name);
+  }
+
+  const managedFile = codexManagedConfig();
+  if (existsSync(managedFile)) {
+    const managedNames = codexMcpNamesFromToml(
+      readFileSync(managedFile, "utf8"),
+      managedFile,
+    );
+    if (managedNames.length > 0) {
+      throw new CliError(
+        "Cannot safely override MCP servers from managed Codex configuration.",
+        3,
+      );
+    }
+  }
+  const managedPreference = codexManagedPreference(env);
+  if (
+    managedPreference &&
+    codexMcpNamesFromToml(managedPreference, "managed Codex preferences").length > 0
+  ) {
     throw new CliError(
-      `Cannot safely parse the Codex MCP inventory: ${error.message}`,
+      "Cannot safely override MCP servers from managed Codex preferences.",
       3,
     );
   }
+  return [...names].sort();
 }
 
 export function codexMcpServersForReview(
@@ -449,57 +768,116 @@ export function codexMcpServersForReview(
   env,
   inventory = configuredCodexMcpServers,
 ) {
-  try {
-    return inventory(state, env);
-  } catch (error) {
-    if (!state.isolateCodexConfig) throw error;
-    const projectConfig = path.join(state.root, ".codex", "config.toml");
-    if (
-      existsSync(projectConfig) &&
-      /\bmcp_servers\b/u.test(readFileSync(projectConfig, "utf8"))
-    ) {
+  return inventory(state, env);
+}
+
+export function parseCodexFeatureList(output) {
+  const features = new Map();
+  for (const line of output.split(/\r?\n/u)) {
+    const match = line
+      .trim()
+      .match(/^([A-Za-z0-9_-]+)\s+(.+?)\s+(true|false)$/u);
+    if (!match) continue;
+    features.set(match[1], match[3] === "true");
+  }
+  if (features.size === 0) {
+    throw new CliError("Cannot parse the Codex feature inventory.", 3);
+  }
+  return features;
+}
+
+function runCodexFeatureList(root, env, disabledFeatures = []) {
+  const args = ["features", "list"];
+  for (const feature of disabledFeatures) args.push("--disable", feature);
+  const result = run("codex", args, {
+    cwd: root,
+    env,
+    allowFailure: true,
+  });
+  if (result.status !== 0) {
+    const detail = (result.stderr || result.stdout).trim();
+    throw new CliError(
+      `Cannot verify Codex feature isolation${detail ? `: ${detail}` : ""}.`,
+      3,
+    );
+  }
+  return parseCodexFeatureList(result.stdout);
+}
+
+export function codexFeaturesForReview(
+  state,
+  env,
+  storage,
+  inventory = runCodexFeatureList,
+) {
+  let temporaryHome = null;
+  let probeEnv = env;
+  if (state.isolateCodexConfig) {
+    if (!storage) {
       throw new CliError(
-        "Cannot safely isolate project MCP tools while the user MCP inventory is unreadable.",
+        "Cannot isolate Codex configuration without Git-local runtime storage.",
         3,
       );
     }
-    return [];
+    mkdirSync(storage, { recursive: true });
+    temporaryHome = mkdtempSync(path.join(storage, "codex-config-probe-"));
+    probeEnv = { ...env, CODEX_HOME: temporaryHome };
+  }
+  try {
+    const supported = inventory(state.root, probeEnv);
+    const disabled = CODEX_REVIEW_DISABLED_FEATURES.filter((feature) =>
+      supported.has(feature),
+    );
+    const effective = inventory(state.root, probeEnv, disabled);
+    const active = disabled.filter((feature) => effective.get(feature) !== false);
+    if (active.length > 0) {
+      throw new CliError(
+        `Cannot safely disable managed Codex features: ${active.join(", ")}.`,
+        3,
+      );
+    }
+    return disabled;
+  } finally {
+    if (temporaryHome) rmSync(temporaryHome, { recursive: true, force: true });
   }
 }
 
-export function codexReviewArgs(isolateUserConfig = false, mcpServers = []) {
+export function codexReviewArgs(
+  isolateUserConfig = false,
+  mcpServers = [],
+  disabledFeatures = CODEX_REVIEW_DISABLED_FEATURES,
+) {
   const mcpOverride = codexMcpDisableOverride(mcpServers);
-  return [
-    "exec",
-    "--sandbox",
-    "read-only",
-    "--disable",
-    "hooks",
-    "--disable",
-    "apps",
-    "--disable",
-    "multi_agent",
-    "--disable",
-    "multi_agent_v2",
+  const args = ["exec", "--sandbox", "read-only"];
+  for (const feature of disabledFeatures) args.push("--disable", feature);
+  args.push(
     ...(mcpOverride ? ["-c", mcpOverride] : []),
     "review",
     "--ephemeral",
     ...(isolateUserConfig ? ["--ignore-user-config"] : []),
     "-",
-  ];
+  );
+  return args;
 }
 
-function providerInvocation(state, prompt, env) {
+function providerInvocation(state, prompt, env, repo) {
   switch (state.provider) {
-    case "codex":
+    case "codex": {
+      const disabledFeatures = codexFeaturesForReview(
+        state,
+        env,
+        repo.storage,
+      );
       return {
         command: "codex",
         args: codexReviewArgs(
           Boolean(state.isolateCodexConfig),
           codexMcpServersForReview(state, env),
+          disabledFeatures,
         ),
         input: prompt,
       };
+    }
     case "gemini":
       return {
         command: "gemini",
@@ -815,7 +1193,12 @@ async function startCommand(repo, options, env) {
     );
   }
   const requestedProvider = options.provider ?? "auto";
-  const provider = chooseProvider(requestedProvider, env);
+  const isolateCodexConfig = Boolean(options["isolate-codex-config"]);
+  const provider = chooseProvider(requestedProvider, env, {
+    root: repo.root,
+    storage: repo.storage,
+    isolateCodexConfig,
+  });
   const now = new Date().toISOString();
   const state = {
     schemaVersion: STATE_SCHEMA_VERSION,
@@ -828,7 +1211,7 @@ async function startCommand(repo, options, env) {
     provider,
     round: 0,
     maxRounds: reviewRoundLimit(provider, options["max-rounds"]),
-    isolateCodexConfig: Boolean(options["isolate-codex-config"]),
+    isolateCodexConfig,
     initialHead: git(repo.root, ["rev-parse", "HEAD"]).stdout.trim(),
     findingHistory: {},
     lastReview: null,
@@ -868,7 +1251,7 @@ async function reviewCommand(repo, env) {
   }
   const before = snapshot(repo.root, state.base);
   const prompt = reviewPrompt(state, files);
-  const invocation = providerInvocation(state, prompt, env);
+  const invocation = providerInvocation(state, prompt, env, repo);
   const timeoutMs = integerOption(
     env.CODEX_REVIEW_LOOP_TIMEOUT_MS,
     DEFAULT_TIMEOUT_MS,
