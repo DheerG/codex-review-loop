@@ -666,6 +666,24 @@ default_permissions = ":read-only"
     ["features.browser_use"],
   );
   assert.deepEqual(
+    codexRequirementsHazardsFromToml(
+      "[features]\nbrowser_use = false\nunified_exec = false",
+    ),
+    [],
+  );
+  assert.deepEqual(
+    codexRequirementsHazardsFromToml(
+      "features = { browser_use = false, unified_exec = false }",
+    ),
+    [],
+  );
+  assert.deepEqual(
+    codexRequirementsHazardsFromToml(
+      "[feature_requirements]\ncodex_hooks = true\nunified_exec = true",
+    ),
+    ["feature_requirements.codex_hooks"],
+  );
+  assert.deepEqual(
     codexManagedHazardsFromToml(
       '[projects."/tmp/project"]\ntrust_level = "trusted"',
     ),
@@ -1018,6 +1036,85 @@ obsolete_external_tool             removed            true
     { model: "gpt-profile" },
   );
 
+  const userIgnoredMcpServers = [];
+  codexFeaturesForReview(
+    {
+      root: "/tmp/repository",
+      isolateCodexConfig: false,
+      codexLegacyProfiles: true,
+    },
+    {},
+    undefined,
+    (_root, _env, requested = []) =>
+      new Map([
+        ["hooks", !requested.includes("hooks")],
+        ["shell_tool", true],
+      ]),
+    () => ({
+      managedConfigs: [
+        {
+          contents: "notify = []",
+          file: "cloud-managed Codex config (policy)",
+        },
+      ],
+      requirementsConfigs: [],
+    }),
+    {
+      localConfigInventory: {
+        ordinaryConfigs: [
+          {
+            contents:
+              'profile = "danger"\n[profiles.danger.mcp_servers.writer]\ncommand = "writer"',
+            file: "system config",
+          },
+        ],
+        managedConfigs: [],
+        requirementsConfigs: [],
+      },
+      mcpServers: userIgnoredMcpServers,
+      preferenceContext: {
+        userConfig: {
+          contents: 'profile = "safe"',
+          file: "user config",
+        },
+      },
+    },
+  );
+  assert.deepEqual(userIgnoredMcpServers, ["writer"]);
+
+  assert.throws(
+    () =>
+      codexFeaturesForReview(
+        {
+          root: "/tmp/repository",
+          isolateCodexConfig: true,
+          codexLegacyProfiles: true,
+        },
+        {},
+        undefined,
+        (_root, _env, requested = []) =>
+          new Map([
+            ["hooks", !requested.includes("hooks")],
+            ["shell_tool", true],
+          ]),
+        () => ({
+          managedConfigs: [
+            {
+              contents:
+                'profile = "danger"\n[profiles.danger.mcp_servers.writer]\ncommand = "writer"',
+              file: "highest-priority cloud config",
+            },
+            {
+              contents: 'profile = "safe"',
+              file: "lower-priority cloud config",
+            },
+          ],
+          requirementsConfigs: [],
+        }),
+      ),
+    /highest-priority cloud config/u,
+  );
+
   const permissionProfileFeatures = codexFeaturesForReview(
     { root: "/tmp/repository", isolateCodexConfig: true },
     {},
@@ -1055,6 +1152,17 @@ test("isolated Codex feature probing skips user config without losing invocation
   };
   let probeHome;
   try {
+    const staleHome = path.join(
+      storage,
+      "codex-feature-inventory-999999999999-abandoned",
+    );
+    const liveHome = path.join(
+      storage,
+      `codex-feature-inventory-${process.pid}-active`,
+    );
+    mkdirSync(staleHome);
+    mkdirSync(liveHome);
+    writeFileSync(path.join(staleHome, "auth.json"), "stale credential");
     const disabled = codexFeaturesForReview(
       { root: "/tmp/repository", isolateCodexConfig: true },
       env,
@@ -1081,6 +1189,8 @@ test("isolated Codex feature probing skips user config without losing invocation
     assert.deepEqual(disabled, ["codex_hooks", "apps", "multi_agent"]);
     assert.equal(env.CODEX_HOME, "/authenticated/codex-home-with-malformed-config");
     assert.equal(existsSync(probeHome), false);
+    assert.equal(existsSync(staleHome), false);
+    assert.equal(existsSync(liveHome), true);
   } finally {
     rmSync(storage, { recursive: true, force: true });
   }

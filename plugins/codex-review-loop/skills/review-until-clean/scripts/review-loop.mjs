@@ -12,6 +12,7 @@ import {
   mkdirSync,
   mkdtempSync,
   openSync,
+  readdirSync,
   readFileSync,
   readSync,
   readlinkSync,
@@ -34,6 +35,8 @@ const MAX_CAPTURE_BYTES = 64 * 1024 * 1024;
 const MAX_CODEX_CONFIG_BYTES = 1024 * 1024;
 const MAX_CODEX_IDENTITY_BYTES = 4 * 1024 * 1024;
 const MAX_CODEX_CLOUD_CACHE_BYTES = 16 * 1024 * 1024;
+const CODEX_TEMP_HOME_PREFIX = "codex-feature-inventory-";
+const MAX_CODEX_TEMP_HOME_AGE_MS = 25 * 60 * 60 * 1_000;
 const DEFAULT_COMMIT_SECTIONS = ["Failure", "Change", "Verification"];
 const CODEX_REVIEW_DISABLED_FEATURES = [
   "hooks",
@@ -393,17 +396,16 @@ function reflogCovers(root, ref, startedAt) {
     allowFailure: true,
   });
   if (result.status !== 0) return false;
-  const timestamps = result.stdout
-    .split(/\r?\n/u)
-    .filter(Boolean)
-    .map((selector) => Number(selector.match(/@\{(-?\d+)\}$/u)?.[1]))
-    .filter(Number.isFinite);
   const startSecond = Math.floor(startedAt.valueOf() / 1_000);
-  return (
-    timestamps.length > 0 &&
-    Math.min(...timestamps) < startSecond &&
-    !timestamps.includes(startSecond)
-  );
+  let earliest = Number.POSITIVE_INFINITY;
+  let includesStart = false;
+  for (const selector of result.stdout.split(/\r?\n/u)) {
+    const timestamp = Number(selector.match(/@\{(-?\d+)\}$/u)?.[1]);
+    if (!Number.isFinite(timestamp)) continue;
+    if (timestamp < earliest) earliest = timestamp;
+    if (timestamp === startSecond) includesStart = true;
+  }
+  return earliest < startSecond && !includesStart;
 }
 
 function pinPersistedBase(root, state) {
@@ -1449,14 +1451,15 @@ export function codexRequirementsHazardsFromToml(
     } else if (key === "remote_sandbox_config") {
       hazards.add("remote_sandbox_config");
     } else if (
-      key === "features" &&
+      record.parts.length === 2 &&
+      ["features", "feature_requirements"].includes(key) &&
       codexFeatureRequiresIsolation(child)
     ) {
       const value = record.value?.trim();
       if (!["true", "false"].includes(value)) {
         throw new CliError(`Cannot parse a required feature in ${source}.`, 3);
       }
-      if (value === "true") hazards.add(`features.${child}`);
+      if (value === "true") hazards.add(`${key}.${child}`);
     }
   }
   if (allowedProfilesPresent) {
@@ -1943,6 +1946,44 @@ function copyCodexIdentityForProbe(state, sourceEnv, temporaryHome) {
   return authOverrides;
 }
 
+function codexProcessIsRunning(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+function removeStaleCodexHomes(parent) {
+  const now = Date.now();
+  for (const entry of readdirSync(parent, { withFileTypes: true })) {
+    if (!entry.name.startsWith(CODEX_TEMP_HOME_PREFIX) || !entry.isDirectory()) {
+      continue;
+    }
+    const candidate = path.join(parent, entry.name);
+    let details;
+    try {
+      details = lstatSync(candidate);
+    } catch (error) {
+      if (error?.code === "ENOENT") continue;
+      throw error;
+    }
+    if (!details.isDirectory() || details.isSymbolicLink()) continue;
+    const ownerText = entry.name
+      .slice(CODEX_TEMP_HOME_PREFIX.length)
+      .match(/^(\d+)-/u)?.[1];
+    const owner = ownerText === undefined ? null : Number(ownerText);
+    const ownerIsDead = owner !== null && !codexProcessIsRunning(owner);
+    const homeIsTooOld =
+      now - details.mtimeMs > MAX_CODEX_TEMP_HOME_AGE_MS;
+    if (ownerIsDead || homeIsTooOld) {
+      rmSync(candidate, { recursive: true, force: true });
+    }
+  }
+}
+
 function cloudFragments(bundle, key, label) {
   const fragments = bundle?.[key]?.enterprise_managed;
   if (fragments === undefined || fragments === null) return [];
@@ -2122,12 +2163,10 @@ function assertCloudCodexConfigurationSafe(
   const ordinaryConfigs = localInventory.ordinaryConfigs ?? [];
   const managedConfigs = localInventory.managedConfigs ?? [];
   const requirementsConfigs = localInventory.requirementsConfigs ?? [];
-  const userPreferenceConfig = reviewOptions.preferenceContext?.userConfig;
   const mergedConfigs = [
     ...ordinaryConfigs,
-    ...(userPreferenceConfig ? [userPreferenceConfig] : []),
     ...managedConfigs,
-    ...cloudConfigs,
+    ...[...cloudConfigs].reverse(),
   ];
   const legacyProfiles =
     mergedConfigs.length === 0
@@ -2219,7 +2258,10 @@ export function codexFeaturesForReview(
   let retained = false;
   const parent = storage ?? os.tmpdir();
   mkdirSync(parent, { recursive: true });
-  temporaryHome = mkdtempSync(path.join(parent, "codex-feature-inventory-"));
+  removeStaleCodexHomes(parent);
+  temporaryHome = mkdtempSync(
+    path.join(parent, `${CODEX_TEMP_HOME_PREFIX}${process.pid}-`),
+  );
   const probeEnv = { ...env, CODEX_HOME: temporaryHome };
   try {
     const supported = inventory(state.root, probeEnv);
