@@ -2167,7 +2167,32 @@ function configuredCodexMcpServers(state, env) {
     });
   }
 
-  const options = { legacyProfiles, selectedLegacyProfile: null };
+  const names = codexMcpInventoryFromConfigs(
+    ordinaryConfigs,
+    managedConfigs,
+    legacyProfiles,
+  );
+  return withCodexIsolationMetadata(names, {
+    localConfigInventory: {
+      ordinaryConfigs,
+      managedConfigs,
+      requirementsConfigs,
+    },
+  });
+}
+
+export function codexMcpInventoryFromConfigs(
+  ordinaryConfigs,
+  managedConfigs,
+  legacyProfiles,
+) {
+  const selectedLegacyProfile = legacyProfiles
+    ? codexSelectedLegacyProfileFromConfigs([
+        ...ordinaryConfigs,
+        ...managedConfigs,
+      ])
+    : null;
+  const options = { legacyProfiles, selectedLegacyProfile };
   const names = new Set();
   for (const config of ordinaryConfigs) {
     const promptHazards = codexPromptHazardsFromToml(
@@ -2205,16 +2230,10 @@ function configuredCodexMcpServers(state, env) {
       config.contents,
       config.file,
       legacyProfiles,
-      null,
+      selectedLegacyProfile,
     );
   }
-  return withCodexIsolationMetadata([...names].sort(), {
-    localConfigInventory: {
-      ordinaryConfigs,
-      managedConfigs,
-      requirementsConfigs,
-    },
-  });
+  return [...names].sort();
 }
 
 function codexAuthOverridesFromRecords(records, source) {
@@ -4002,7 +4021,14 @@ function hasNonWaivableCommandAttribution(text, allowProductTerms) {
 function isCommandShapedVerification(text, allowProductTerms = false) {
   const shellPrompt = text.match(/^\$\s+(.+)/u);
   if (shellPrompt) {
-    const command = withoutLeadingEnvironmentAssignments(shellPrompt[1]);
+    const originalCommand = shellPrompt[1];
+    if (
+      hasNonWaivableCommandAttribution(originalCommand, allowProductTerms) ||
+      hasAttributedShellComment(originalCommand)
+    ) {
+      return false;
+    }
+    const command = withoutLeadingEnvironmentAssignments(originalCommand);
     return (
       !hasNonWaivableCommandAttribution(command, allowProductTerms) &&
       !hasAttributedShellComment(command)
@@ -4010,8 +4036,15 @@ function isCommandShapedVerification(text, allowProductTerms = false) {
   }
   const markdownCommand = text.match(/^`([^`]+)`$/u);
   if (markdownCommand) {
+    const originalCommand = markdownCommand[1].trim();
+    if (
+      hasNonWaivableCommandAttribution(originalCommand, allowProductTerms) ||
+      hasAttributedShellComment(originalCommand)
+    ) {
+      return false;
+    }
     const command = withoutLeadingEnvironmentAssignments(
-      markdownCommand[1].trim(),
+      originalCommand,
     );
     return (
       !hasNonWaivableCommandAttribution(command, allowProductTerms) &&
@@ -4191,6 +4224,7 @@ function longCommitProseLine(body, allowProductTerms = false) {
 }
 
 const AI_AUTHORSHIP_ACTION_SOURCE = String.raw`(?:reviewed|generated|suggested|assisted|authored|co[ -]?authored|written|wrote|created|made|produced|build(?:s|ing)?|built|implement(?:s|ed|ing)?|develop(?:s|ed|ing)?|programmed|pair[ -]?programmed|help(?:ed|s|ing)?(?:\s+(?:to\s+)?author)?)`;
+const DIRECT_AI_USE_AUTHORSHIP_SOURCE = String.raw`\b(?:use|uses|used|using)\s+(?:(?:an?|the)\s+)?${AI_ATTRIBUTION_IDENTITY_SOURCE}\b.{0,40}\b(?:to\s+)?${AI_AUTHORSHIP_ACTION_SOURCE}\b`;
 const AI_ATTRIBUTION_IDENTITY = new RegExp(
   String.raw`\b${AI_ATTRIBUTION_IDENTITY_SOURCE}\b`,
   "iu",
@@ -4206,6 +4240,7 @@ const COMPOSITE_AI_PROVIDER_IDENTITY = new RegExp(
 const GENERIC_AI_TRAILER_IDENTITY = /^(?:AI|LLM)\b/iu;
 const GENERIC_AI_TRAILER_PHRASE = /^(?:artificial intelligence|language model)\b/iu;
 const EXPLICIT_AI_AUTHORSHIP_PATTERNS = [
+  new RegExp(DIRECT_AI_USE_AUTHORSHIP_SOURCE, "iu"),
   new RegExp(
     String.raw`\b${AI_AUTHORSHIP_ACTION_SOURCE}\b.{0,50}\b(?:by|with|using|via|from)\s+(?:(?:an?|the)\s+)?${AI_ATTRIBUTION_IDENTITY_SOURCE}\b`,
     "iu",
@@ -4217,12 +4252,13 @@ const EXPLICIT_AI_AUTHORSHIP_PATTERNS = [
 ];
 const CHANGE_AUTHORSHIP_OBJECT_SOURCE = String.raw`(?:changes?|code|implementation|commits?|patch|message|work)`;
 const PRODUCT_EXCEPTION_AI_AUTHORSHIP_PATTERNS = [
+  new RegExp(DIRECT_AI_USE_AUTHORSHIP_SOURCE, "iu"),
   new RegExp(
     String.raw`\b${AI_ATTRIBUTION_IDENTITY_SOURCE}\b[\s-]+${AI_AUTHORSHIP_ACTION_SOURCE}\b`,
     "iu",
   ),
   new RegExp(
-    String.raw`\b${AI_AUTHORSHIP_ACTION_SOURCE}\b.{0,50}\b(?:by|with|using|via|from)\s+(?:(?:an?|the)\s+)?${AI_ATTRIBUTION_IDENTITY_SOURCE}\b(?=$|[\t ]*(?:[.,;:!?)}\]]|(?:to|for|while|during|after|before|because|so|and|or|but|which|that|who|when|where)\b))`,
+    String.raw`\b${AI_AUTHORSHIP_ACTION_SOURCE}\b.{0,50}\b(?:by|with|using|via|from)\s+(?:(?:an?|the)\s+)?${AI_ATTRIBUTION_IDENTITY_SOURCE}\b(?=$|[\t ]*(?:["'.,;:!?)}\]]|(?:to|for|while|during|after|before|because|so|and|or|but|which|that|who|when|where)\b))`,
     "iu",
   ),
   new RegExp(

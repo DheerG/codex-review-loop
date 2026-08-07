@@ -25,6 +25,7 @@ import {
   codexFeaturesForReview,
   codexManagedHazardsFromToml,
   codexManagedConfigPath,
+  codexMcpInventoryFromConfigs,
   codexMcpDisableOverrides,
   codexMcpNamesFromToml,
   codexMcpServersForReview,
@@ -662,6 +663,20 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
   assert.deepEqual(
     codexManagedHazardsFromToml(
       "features.multi_agent_v2 = { enabled = false, max_concurrent_threads_per_session = 2 }",
+    ),
+    [],
+  );
+  assert.deepEqual(
+    codexMcpInventoryFromConfigs(
+      [
+        {
+          contents:
+            'approval_policy = "on-request"\nprofile = "safe"\n[profiles.safe]\napproval_policy = "never"',
+          file: "system config",
+        },
+      ],
+      [],
+      true,
     ),
     [],
   );
@@ -2574,6 +2589,10 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "- npm test \\\n  --message=\"Reviewed by Codex\"",
     '- node --message="Addressed Codex review feedback"',
     "- codex review inspired this implementation --strict",
+    '- $ MESSAGE="Reviewed by Codex" npm test',
+    '- `MESSAGE="Reviewed by Codex" npm test`',
+    '- MESSAGE="Reviewed by Codex" npm test',
+    "- Used Codex to implement this patch.",
   ]) {
     result = invoke(
       directory,
