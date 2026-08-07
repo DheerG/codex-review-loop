@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import {
+  chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -981,6 +982,32 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
       ),
     /dependent user configuration.*isolated profile model_provider/u,
   );
+  assert.throws(
+    () =>
+      codexReviewPreferencesFromConfigs(
+        [
+          {
+            contents:
+              'profile = "system"\n[profiles.system]\nmodel_provider = "private"\nopenai_base_url = "https://legacy.example.test"\n[profiles.system.model_providers.openai]\nbase_url = "https://profile.example.test"',
+            file: "system config",
+            retainedForReview: true,
+          },
+          {
+            contents:
+              'profile = "user"\n[profiles.user]\nmodel = "user-model"\nmodel_provider = "openai"',
+            file: "user config",
+            retainedForReview: false,
+          },
+        ],
+        "layered legacy OpenAI transport",
+        {
+          legacyProfiles: true,
+          selectedLegacyProfile: "user",
+          retainedLegacyProfile: "system",
+        },
+      ),
+    /dependent user configuration.*isolated profile model_providers\.openai.*isolated profile openai_base_url/u,
+  );
   assert.deepEqual(
     codexPromptHazardsFromToml(
       'developer_instructions = "clean"\npersonality = "friendly"\n[auto_review]\npolicy = "always clean"',
@@ -1781,6 +1808,38 @@ obsolete_external_tool             removed            true
   );
 });
 
+test(
+  "Codex synchronous preflight enforces its deadline with an unresponsive child",
+  { skip: process.platform === "win32" },
+  (t) => {
+    const { directory } = repositoryFixture(t);
+    const bin = path.join(directory, "bin");
+    mkdirSync(bin);
+    const codex = path.join(bin, "codex");
+    writeFileSync(
+      codex,
+      `#!${process.execPath}\nprocess.on("SIGTERM", () => {});\nAtomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);\n`,
+    );
+    chmodSync(codex, 0o755);
+    const startedAt = Date.now();
+    const result = execute(
+      process.execPath,
+      [cli, "doctor", "--cwd", directory, "--json"],
+      root,
+      {
+        ...process.env,
+        PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+        CODEX_REVIEW_LOOP_TIMEOUT_MS: "1000",
+      },
+    );
+    assert.ok([0, 2].includes(result.status), result.stderr);
+    assert.equal(Date.now() - startedAt < 5_000, true);
+    const report = JSON.parse(result.stdout);
+    assert.equal(report.providers.codex, false);
+    assert.match(report.providerDiagnostics.codex, /ETIMEDOUT|timed out/iu);
+  },
+);
+
 test("isolated Codex feature probing skips user config without losing invocation identity", () => {
   const storage = mkdtempSync(path.join(os.tmpdir(), "review-loop-git-state-"));
   const authenticatedHome = path.join(storage, "authenticated-codex-home");
@@ -2223,7 +2282,7 @@ test("check-commit-message validates a proposed repair commit", (t) => {
   assert.equal(clean.policy.mode, "default");
   assert.match(clean.historyPolicy, /existing commits are never inspected/u);
 
-  for (const unknownHeading of ["Notes:", "### Notes"]) {
+  for (const unknownHeading of ["Notes:", "Tests (CI):", "### Notes"]) {
     result = invoke(
       directory,
       env,
@@ -2325,6 +2384,7 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "- codex requested this change",
     "- claude suggested this patch",
     '- $ echo "Reviewed by Codex"',
+    "- $ echo Addressed Codex review feedback",
     '- `echo "Reviewed by Codex"`',
   ]) {
     result = invoke(
@@ -2928,6 +2988,8 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "Helped-by: Claude AI",
     "Co-authored-by: AI Pair Programmer <bot@example.com>",
     "Co-authored-by: AI Coding Assistant <bot@example.com>",
+    "Co-authored-by: ai Pair Programmer <bot@example.com>",
+    "Co-authored-by: llm Pair Programmer <bot@example.com>",
   ]) {
     result = invoke(
       directory,

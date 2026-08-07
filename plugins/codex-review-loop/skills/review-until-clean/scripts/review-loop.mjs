@@ -90,6 +90,7 @@ function run(command, args, options = {}) {
     encoding: "utf8",
     env: options.env ?? process.env,
     input: options.input,
+    killSignal: options.timeoutMs ? "SIGKILL" : undefined,
     maxBuffer: MAX_CAPTURE_BYTES,
     timeout: options.timeoutMs,
     stdio: ["pipe", "pipe", "pipe"],
@@ -1255,12 +1256,11 @@ function codexIsolatedTransportDependencies(records, source) {
   const dependencies = [];
   if (modelProvider !== "openai") {
     dependencies.push(`model_provider=${JSON.stringify(modelProvider)}`);
-  } else {
-    if (configuredProviders.has("openai")) {
-      dependencies.push("model_providers.openai");
-    }
-    if (openAiBaseUrl) dependencies.push("openai_base_url");
   }
+  if (configuredProviders.has("openai")) {
+    dependencies.push("model_providers.openai");
+  }
+  if (openAiBaseUrl) dependencies.push("openai_base_url");
   if (modelCatalog) dependencies.push("model_catalog_json");
   return dependencies;
 }
@@ -3713,7 +3713,7 @@ function isCommandShapedVerification(text) {
   if (shellPrompt) {
     const command = withoutLeadingEnvironmentAssignments(shellPrompt[1]);
     return (
-      !startsWithWorkflowAttribution(command) &&
+      !hasWorkflowAttribution(command) &&
       !hasExplicitAiAuthorship(command) &&
       !hasAttributedShellComment(command)
     );
@@ -3724,7 +3724,7 @@ function isCommandShapedVerification(text) {
       markdownCommand[1].trim(),
     );
     return (
-      !startsWithWorkflowAttribution(command) &&
+      !hasWorkflowAttribution(command) &&
       !hasExplicitAiAuthorship(command) &&
       !hasAttributedShellComment(command)
     );
@@ -3793,7 +3793,7 @@ function verificationEvidenceLines(
       continue;
     }
     if (
-      /^(?:#{1,6}\s+\S.*|[A-Za-z][A-Za-z0-9 /_-]{0,80}:)\s*$/u.test(
+      /^(?:#{1,6}\s+\S.*|[A-Za-z][^:\r\n]{0,80}:)\s*$/u.test(
         line.trim(),
       )
     ) {
@@ -3890,7 +3890,7 @@ const COMPOSITE_AI_PROVIDER_IDENTITY = new RegExp(
   String.raw`\b(?:codex|gemini|chatgpt|gpt(?:-\d+(?:\.\d+)*)?|openai|anthropic|opencode|(?:github[\s-]+)?copilot|cursor|windsurf|aider|codeium|tabnine|qodo|amazon\s+q|sourcegraph\s+cody)\b`,
   "iu",
 );
-const GENERIC_AI_TRAILER_IDENTITY = /^(?:AI|LLM)\b/u;
+const GENERIC_AI_TRAILER_IDENTITY = /^(?:AI|LLM)\b/iu;
 const GENERIC_AI_TRAILER_PHRASE = /^(?:artificial intelligence|language model)\b/iu;
 const EXPLICIT_AI_AUTHORSHIP_PATTERNS = [
   new RegExp(
