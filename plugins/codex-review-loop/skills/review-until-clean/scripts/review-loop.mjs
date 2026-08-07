@@ -1915,15 +1915,11 @@ export function codexAuthOverridesFromConfigs(
 }
 
 function configuredCodexAuthOverrides(state, env) {
-  const userConfig = codexConfigFile(path.join(codexHome(env), "config.toml"));
-  if (!userConfig) return [];
-  const legacyProfiles = Object.hasOwn(state, "codexLegacyProfiles")
-    ? Boolean(state.codexLegacyProfiles)
-    : codexUsesLegacyProfiles(state, env);
   const configs = [];
   const systemConfig = codexConfigFile(codexSystemConfig(env));
   if (systemConfig) configs.push(systemConfig);
-  configs.push(userConfig);
+  const userConfig = codexConfigFile(path.join(codexHome(env), "config.toml"));
+  if (userConfig) configs.push(userConfig);
   for (const managedFile of codexManagedConfigPaths(env)) {
     const config = codexConfigFile(managedFile);
     if (config) configs.push(config);
@@ -1935,6 +1931,10 @@ function configuredCodexAuthOverrides(state, env) {
       file: "managed Codex preferences",
     });
   }
+  if (configs.length === 0) return [];
+  const legacyProfiles = Object.hasOwn(state, "codexLegacyProfiles")
+    ? Boolean(state.codexLegacyProfiles)
+    : codexUsesLegacyProfiles(state, env);
   const selectedLegacyProfile = legacyProfiles
     ? codexSelectedLegacyProfileFromConfigs(configs)
     : null;
@@ -3404,6 +3404,10 @@ const PRODUCT_PROVENANCE_CAUSAL_PATTERNS = PRODUCT_PROVENANCE_SOURCES.flatMap(
       String.raw`${source}.{0,40}\b(?:prompted|caused|drove|motivated|triggered|led\s+to|resulted\s+in)\s+(?:(?:this|the|these)\s+)?(?:changes?|code|implementation|commits?|patch|work)\b`,
       "iu",
     ),
+    new RegExp(
+      String.raw`\b(?:changes?|code|implementation|commits?|patch|work)\b\s+(?:was|were|is|are|has\s+been|have\s+been)\s+(?:prompted|caused|driven|motivated|triggered|informed|guided)\s+by\s+${source}`,
+      "iu",
+    ),
   ],
 );
 
@@ -3535,7 +3539,11 @@ function hasUnambiguousShellSyntax(text) {
   );
 }
 
-function verificationEvidenceLines(body, anySection = false) {
+function verificationEvidenceLines(
+  body,
+  anySection = false,
+  allowProductTerms = false,
+) {
   const evidence = new Set();
   let section = null;
   let commandContinues = false;
@@ -3556,7 +3564,7 @@ function verificationEvidenceLines(body, anySection = false) {
     } else if (
       commandContinues &&
       /^\s+\S/u.test(line) &&
-      isVerbatimVerificationContinuation(line)
+      isVerbatimVerificationContinuation(line, allowProductTerms)
     ) {
       evidence.add(index);
       commandContinues = hasShellContinuationMarker(line);
@@ -3585,14 +3593,15 @@ function hasShellContinuationMarker(line) {
   );
 }
 
-function isVerbatimVerificationContinuation(line) {
+function isVerbatimVerificationContinuation(line, allowProductTerms = false) {
   const trimmed = line.trim();
+  const option = /^--?[A-Za-z0-9][A-Za-z0-9_-]*(?:=|\s|$)/u.test(trimmed);
   return (
-    !hasWorkflowAttribution(trimmed) &&
+    (!hasWorkflowAttribution(trimmed) || (allowProductTerms && option)) &&
     (
       isCommandShapedVerification(trimmed) ||
       /^[A-Za-z][A-Za-z0-9]*-[A-Za-z][A-Za-z0-9]*(?:\s|$)/u.test(trimmed) ||
-      /^--?[A-Za-z0-9][A-Za-z0-9_-]*(?:=|\s|$)/u.test(trimmed) ||
+      option ||
       /^(?:\.{0,2}[\\/])?[A-Za-z0-9_@+.-]+(?:[\\/][A-Za-z0-9_@+.-]+)+(?:\s|$)/u.test(trimmed) ||
       /^[A-Za-z0-9_@+-]+\.[A-Za-z0-9_.-]+(?:\s|$)/u.test(trimmed) ||
       /^(?:["'`]|\$\{)/u.test(trimmed)
@@ -3600,23 +3609,31 @@ function isVerbatimVerificationContinuation(line) {
   );
 }
 
-function commitProseBody(body, anySection = false) {
-  const evidence = verificationEvidenceLines(body, anySection);
+function commitProseBody(
+  body,
+  anySection = false,
+  allowProductTerms = false,
+) {
+  const evidence = verificationEvidenceLines(
+    body,
+    anySection,
+    allowProductTerms,
+  );
   return body
     .split(/\r?\n/u)
     .filter((_, index) => !evidence.has(index))
     .join("\n");
 }
 
-function longCommitProseLine(body) {
-  const evidence = verificationEvidenceLines(body);
+function longCommitProseLine(body, allowProductTerms = false) {
+  const evidence = verificationEvidenceLines(body, false, allowProductTerms);
   const lines = body.split(/\r?\n/u);
   return lines.findIndex(
     (line, index) => line.length > 100 && !evidence.has(index),
   );
 }
 
-const AI_AUTHORSHIP_ACTION_SOURCE = String.raw`(?:reviewed|generated|suggested|assisted|authored|co[ -]?authored|written|created|made|produced|build(?:s|ing)?|built|implement(?:s|ed|ing)?|develop(?:s|ed|ing)?|programmed|pair[ -]?programmed|help(?:ed|s|ing)?(?:\s+(?:to\s+)?author)?)`;
+const AI_AUTHORSHIP_ACTION_SOURCE = String.raw`(?:reviewed|generated|suggested|assisted|authored|co[ -]?authored|written|wrote|created|made|produced|build(?:s|ing)?|built|implement(?:s|ed|ing)?|develop(?:s|ed|ing)?|programmed|pair[ -]?programmed|help(?:ed|s|ing)?(?:\s+(?:to\s+)?author)?)`;
 const AI_ATTRIBUTION_IDENTITY = new RegExp(
   String.raw`\b${AI_ATTRIBUTION_IDENTITY_SOURCE}\b`,
   "iu",
@@ -3688,7 +3705,11 @@ function hasAiAttributionTrailer(message) {
 
 function inspectCommitMessageWithPolicy(subject, body, options) {
   const issues = [];
-  const proseBody = commitProseBody(body, !options.useDefaultBodyFormat);
+  const proseBody = commitProseBody(
+    body,
+    !options.useDefaultBodyFormat,
+    options.allowProductTerms,
+  );
   if (!subject.trim()) {
     issues.push("subject is empty");
   }
@@ -3756,13 +3777,17 @@ function inspectCommitMessageWithPolicy(subject, body, options) {
         }
       }
       const verification = commitSection(body, "Verification");
-      if (verification && verificationEvidenceLines(body).size === 0) {
+      if (
+        verification &&
+        verificationEvidenceLines(body, false, options.allowProductTerms)
+          .size === 0
+      ) {
         issues.push(
           "Verification: section must include an exact command that was run",
         );
       }
     }
-    const longLine = longCommitProseLine(body);
+    const longLine = longCommitProseLine(body, options.allowProductTerms);
     if (longLine >= 0) {
       issues.push(`body line ${longLine + 1} exceeds 100 characters`);
     }

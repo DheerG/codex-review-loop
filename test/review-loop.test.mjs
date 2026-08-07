@@ -796,6 +796,15 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
     ),
     ['cli_auth_credentials_store="keyring"'],
   );
+  assert.deepEqual(
+    codexAuthOverridesFromConfigs([
+      {
+        contents: 'cli_auth_credentials_store = "keyring"',
+        file: "managed config without user config",
+      },
+    ]),
+    ['cli_auth_credentials_store="keyring"'],
+  );
   assert.throws(
     () =>
       codexReviewPreferencesFromToml(
@@ -1972,8 +1981,21 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "subject",
   );
   assert.equal(result.status, 0, result.stderr);
-
   const effectivePolicy = JSON.parse(result.stdout);
+
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
+    "Preserve continued product test names",
+    "--body",
+    `${narrativeCommitBody}\n- node --test \\\n  --test-name-pattern="reject per reviewer feedback"`,
+    "--product-terms",
+    "The command verifies the repository's reviewer-product behavior",
+  );
+  assert.equal(result.status, 0, result.stderr);
+
   assert.equal(effectivePolicy.policy.mode, "override");
   assert.equal(effectivePolicy.policy.source, "CONTRIBUTING.md");
   assert.deepEqual(effectivePolicy.policy.overrides, ["subject"]);
@@ -2275,6 +2297,7 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "Changes authored by the reviewer.",
     "AI co-authored the change.",
     "Claude co-authored the change.",
+    "Codex wrote this code.",
     "Pair programmed with Claude.",
     "AI helped author these changes.",
   ]) {
@@ -2679,6 +2702,7 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "Reviewed by Codex",
     "Reviewer feedback prompted this change",
     "Codex-generated feedback prompted this change",
+    "Changes were prompted by Codex-generated feedback",
     "Review feedback led to this change",
     "Address GitHub Copilot review feedback",
     "Apply Aider suggestions",
