@@ -2608,15 +2608,16 @@ function providerInvocation(state, prompt, env, repo) {
   }
 }
 
-function captureProcess(invocation, options) {
+export function captureProcess(invocation, options) {
   return new Promise((resolve) => {
     let stdout = "";
     let stderr = "";
     let capturedBytes = 0;
     let settled = false;
-    let timedOut = false;
     let forcedKind = null;
     let killTimer;
+    let timer;
+    const maxCaptureBytes = options.maxCaptureBytes ?? MAX_CAPTURE_BYTES;
     const child = spawn(invocation.command, invocation.args, {
       cwd: options.cwd,
       env: options.env,
@@ -2624,11 +2625,11 @@ function captureProcess(invocation, options) {
       stdio: ["pipe", "pipe", "pipe"],
     });
 
-    const finish = (value) => {
+    const finish = (value, preserveKillTimer = false) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      clearTimeout(killTimer);
+      if (!preserveKillTimer) clearTimeout(killTimer);
       resolve(value);
     };
     const terminate = () => {
@@ -2640,10 +2641,13 @@ function captureProcess(invocation, options) {
     const append = (kind, chunk) => {
       if (forcedKind) return;
       capturedBytes += chunk.length;
-      if (capturedBytes > MAX_CAPTURE_BYTES) {
+      if (capturedBytes > maxCaptureBytes) {
         forcedKind = "output_limit";
-        stderr = `${stderr}\nProvider output exceeded ${MAX_CAPTURE_BYTES} bytes.`;
+        stderr = `${stderr}\nProvider output exceeded ${maxCaptureBytes} bytes.`;
         terminate();
+        child.stdout.destroy();
+        child.stderr.destroy();
+        finish({ ok: false, kind: forcedKind, stdout, stderr }, true);
         return;
       }
       if (kind === "stdout") stdout += chunk.toString("utf8");
@@ -2663,16 +2667,17 @@ function captureProcess(invocation, options) {
     child.on("close", (code, signal) => {
       if (forcedKind) {
         finish({ ok: false, kind: forcedKind, stdout, stderr });
-      } else if (timedOut) {
-        finish({ ok: false, kind: "timeout", stdout, stderr });
       } else {
         finish({ ok: code === 0, code, signal, stdout, stderr });
       }
     });
 
-    const timer = setTimeout(() => {
-      timedOut = true;
+    timer = setTimeout(() => {
+      forcedKind = "timeout";
       terminate();
+      child.stdout.destroy();
+      child.stderr.destroy();
+      finish({ ok: false, kind: forcedKind, stdout, stderr }, true);
     }, options.timeoutMs);
     timer.unref();
 
@@ -3220,6 +3225,10 @@ async function reviewCommand(repo, env) {
   };
 }
 
+const AI_ATTRIBUTION_IDENTITY_SOURCE = String.raw`(?:ai|artificial intelligence|llm|language model|assistant|agent|bot|reviewer|codex|claude|gemini|chatgpt|gpt(?:-\d+(?:\.\d+)*)?|openai|anthropic|opencode|(?:github[\s-]+)?copilot|cursor|windsurf|aider|devin|codeium|tabnine|qodo|amazon\s+q|sourcegraph\s+cody)`;
+const WORKFLOW_ACTION_SOURCE = String.raw`(?:address(?:es|ed|ing)?|appl(?:y|ies|ied|ying)|fix(?:es|ed|ing)?|resolv(?:e|es|ed|ing)|handl(?:e|es|ed|ing)|incorporat(?:e|es|ed|ing)|implement(?:s|ed|ing)?|clos(?:e|es|ed|ing)|clear(?:s|ed|ing)?|tackl(?:e|es|ed|ing)|satisf(?:y|ies|ied|ying)|(?:respond|react)(?:s|ed|ing)?\s+to)`;
+const WORKFLOW_ARTIFACT_SOURCE = String.raw`(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance)`;
+
 const PRODUCT_TERM_PATTERNS = [
   /\b(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\b.{0,50}\b(?:review|reviewer|feedback|findings?|comments?|loop|suggestions?|requests?|recommendations?|instructions?|guidance)\b/iu,
   /\b(?:review|reviewer|feedback|findings?|comments?|loop|suggestions?|requests?|recommendations?|instructions?|guidance)\b.{0,50}\b(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\b/iu,
@@ -3228,6 +3237,18 @@ const PRODUCT_TERM_PATTERNS = [
 ];
 
 const WORKFLOW_ATTRIBUTION_PATTERNS = [
+  new RegExp(
+    String.raw`\b${WORKFLOW_ACTION_SOURCE}\s+(?:the\s+)?${AI_ATTRIBUTION_IDENTITY_SOURCE}(?:\s+review(?:er)?)?\s+${WORKFLOW_ARTIFACT_SOURCE}\b`,
+    "iu",
+  ),
+  new RegExp(
+    String.raw`\b${WORKFLOW_ARTIFACT_SOURCE}\s+(?:from|by)\s+(?:(?:an?|the)\s+)?${AI_ATTRIBUTION_IDENTITY_SOURCE}\b`,
+    "iu",
+  ),
+  new RegExp(
+    String.raw`\b${AI_ATTRIBUTION_IDENTITY_SOURCE}\s+review(?:er)?\s+(?:asked|requested|required|suggested|said|recommended|instructed|flagged|identified)\b`,
+    "iu",
+  ),
   /\b(?:reviewed|generated|suggested|assisted|authored|co[ -]?authored|written|created|made|produced)\s+(?:by|with)\s+(?:(?:an?|the)\s+)?(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode|ai|llm|reviewer)\b/iu,
   /\b(?:(?:an?|the)\s+)?(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode|ai|llm|reviewer)[\s-]+(?:reviewed|generated|suggested|assisted|authored|co[ -]?authored|written|created|made|produced)\b/iu,
   /\b(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance)\s+(?:from|by)\s+(?:(?:an?|the)\s+)?(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode|ai|llm|reviewer)\b/iu,
@@ -3474,7 +3495,6 @@ function longCommitProseLine(body) {
   );
 }
 
-const AI_ATTRIBUTION_IDENTITY_SOURCE = String.raw`(?:ai|artificial intelligence|llm|language model|assistant|agent|bot|reviewer|codex|claude|gemini|chatgpt|gpt(?:-\d+(?:\.\d+)*)?|openai|anthropic|opencode|(?:github\s+)?copilot|cursor|windsurf|aider|devin|codeium|tabnine|qodo|amazon\s+q|sourcegraph\s+cody)`;
 const AI_AUTHORSHIP_ACTION_SOURCE = String.raw`(?:reviewed|generated|suggested|assisted|authored|co[ -]?authored|written|created|made|produced|build(?:s|ing)?|built|implement(?:s|ed|ing)?|develop(?:s|ed|ing)?|programmed|pair[ -]?programmed|help(?:ed|s|ing)?(?:\s+(?:to\s+)?author)?)`;
 const AI_ATTRIBUTION_IDENTITY = new RegExp(
   String.raw`\b${AI_ATTRIBUTION_IDENTITY_SOURCE}\b`,
@@ -3529,7 +3549,14 @@ function hasAiAttributionTrailer(message) {
     const displayIdentity = trailer.groups.identity
       .replace(/<[^<>]*>\s*$/u, "")
       .trim();
-    return AI_ATTRIBUTION_TRAILER_IDENTITY.test(displayIdentity);
+    const candidates = [
+      displayIdentity,
+      displayIdentity.replace(/\s*\[(?:bot|ai|agent)\]\s*$/iu, "").trim(),
+      displayIdentity.replace(/\s*\([^()]{1,64}\)\s*$/u, "").trim(),
+    ];
+    return candidates.some((identity) =>
+      AI_ATTRIBUTION_TRAILER_IDENTITY.test(identity),
+    );
   });
 }
 

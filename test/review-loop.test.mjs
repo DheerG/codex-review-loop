@@ -16,6 +16,7 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 
 import {
+  captureProcess,
   codexApprovalHazardsFromToml,
   codexAuthOverridesFromConfigs,
   codexAuthOverridesFromToml,
@@ -1726,6 +1727,36 @@ ${"NO_IN_SCOPE_FUNCTIONAL_FINDINGS"}`).status,
   assert.equal(parseReview("Looks good to me.").status, "invalid");
 });
 
+test("provider output limits settle without waiting for inherited pipes", async (t) => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "review-loop-output-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const provider = path.join(directory, "provider.mjs");
+  writeFileSync(
+    provider,
+    `import { spawn } from "node:child_process";
+spawn(process.execPath, ["-e", "setTimeout(() => process.exit(0), 1500)"], {
+  stdio: ["ignore", "inherit", "inherit"],
+});
+process.stdout.write("x".repeat(4096));
+setInterval(() => {}, 1000);
+`,
+  );
+  const startedAt = Date.now();
+  const result = await captureProcess(
+    { command: process.execPath, args: [provider] },
+    {
+      cwd: directory,
+      env: process.env,
+      timeoutMs: 5_000,
+      maxCaptureBytes: 1_024,
+    },
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.kind, "output_limit");
+  assert.match(result.stderr, /exceeded 1024 bytes/u);
+  assert.equal(Date.now() - startedAt < 1_000, true);
+});
+
 test("commit-message rules reject workflow narration", () => {
   assert.match(
     inspectCommitMessage("Address Codex review feedback").join("\n"),
@@ -2390,6 +2421,8 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "Co-authored-by: Amazon Q Developer",
     "Co-authored-by: Claude Sonnet <bot@example.com>",
     "Co-authored-by: Claude 3.5 Sonnet <bot@example.com>",
+    "Co-authored-by: github-copilot[bot] <bot@example.com>",
+    "Co-authored-by: Codex (OpenAI) <bot@example.com>",
   ]) {
     result = invoke(
       directory,
@@ -2521,6 +2554,8 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "Reviewed by Codex",
     "Reviewer feedback prompted this change",
     "Review feedback led to this change",
+    "Address GitHub Copilot review feedback",
+    "Apply Aider suggestions",
   ]) {
     result = invoke(
       directory,
