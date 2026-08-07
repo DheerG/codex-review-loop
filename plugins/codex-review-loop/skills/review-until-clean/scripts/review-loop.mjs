@@ -1598,22 +1598,25 @@ export function codexReviewPreferencesFromConfigs(
   const records = effectiveCodexRecordsFromConfigs(configs, options);
   let isolatedTransportDependencies = [];
   let isolatedTransportCompared = false;
-  if (
-    options.legacyProfiles &&
-    Object.hasOwn(options, "retainedLegacyProfile") &&
-    options.selectedLegacyProfile !== options.retainedLegacyProfile
-  ) {
+  if (configs.some((config) => config.retainedForReview !== true)) {
     isolatedTransportCompared = true;
     const retainedConfigs = configs.filter(
       (config) => config.retainedForReview === true,
     );
+    const retainedLegacyProfile = options.legacyProfiles
+      ? Object.hasOwn(options, "retainedLegacyProfile")
+        ? options.retainedLegacyProfile
+        : codexSelectedLegacyProfileFromConfigs(retainedConfigs)
+      : null;
     const retainedRecords = effectiveCodexRecordsFromConfigs(
       retainedConfigs,
-      {
-        legacyProfiles: true,
-        selectedLegacyProfile: options.retainedLegacyProfile,
-        retainedLegacyProfile: options.retainedLegacyProfile,
-      },
+      options.legacyProfiles
+        ? {
+            legacyProfiles: true,
+            selectedLegacyProfile: retainedLegacyProfile,
+            retainedLegacyProfile,
+          }
+        : { legacyProfiles: false },
     );
     isolatedTransportDependencies = codexIsolatedTransportDependencies(
       records,
@@ -3976,16 +3979,33 @@ function hasAttributedShellComment(text) {
   );
 }
 
+const PRODUCT_TEST_SELECTOR_OPTION = /(?<prefix>(?:^|\s)--?(?:test[-_]?name[-_]?pattern|testnamepattern|grep|filter|match|pattern|[km])(?:=|\s+))(?<value>"(?:\\.|[^"])*"|'[^']*'|\S+)/giu;
+
+function commandAttributionProse(text, allowProductTerms) {
+  if (!allowProductTerms) return text;
+  const withoutSelectors = text.replace(
+    PRODUCT_TEST_SELECTOR_OPTION,
+    (...args) => `${args.at(-1).prefix}"product test selector"`,
+  );
+  return attributionProse(withoutSelectors, true);
+}
+
+function hasNonWaivableCommandAttribution(text, allowProductTerms) {
+  const prose = commandAttributionProse(text, allowProductTerms);
+  return (
+    PRODUCT_WORKFLOW_CAUSAL_PATTERNS.some((pattern) => pattern.test(prose)) ||
+    hasExplicitAiAuthorship(prose, allowProductTerms) ||
+    WORKFLOW_ATTRIBUTION_PATTERNS.some((pattern) => pattern.test(prose))
+  );
+}
+
 function isCommandShapedVerification(text, allowProductTerms = false) {
   const shellPrompt = text.match(/^\$\s+(.+)/u);
   if (shellPrompt) {
     const command = withoutLeadingEnvironmentAssignments(shellPrompt[1]);
-    const attributionLike = hasWorkflowAttribution(command);
     return (
-      !hasExplicitAiAuthorship(command) &&
-      !hasAttributedShellComment(command) &&
-      (!attributionLike ||
-        (allowProductTerms && hasUnambiguousShellSyntax(command)))
+      !hasNonWaivableCommandAttribution(command, allowProductTerms) &&
+      !hasAttributedShellComment(command)
     );
   }
   const markdownCommand = text.match(/^`([^`]+)`$/u);
@@ -3993,12 +4013,9 @@ function isCommandShapedVerification(text, allowProductTerms = false) {
     const command = withoutLeadingEnvironmentAssignments(
       markdownCommand[1].trim(),
     );
-    const attributionLike = hasWorkflowAttribution(command);
     return (
-      !hasExplicitAiAuthorship(command) &&
-      !hasAttributedShellComment(command) &&
-      (!attributionLike ||
-        (allowProductTerms && hasUnambiguousShellSyntax(command)))
+      !hasNonWaivableCommandAttribution(command, allowProductTerms) &&
+      !hasAttributedShellComment(command)
     );
   }
   if (isEnvironmentOnlyCommandContinuation(text)) return true;
@@ -4023,7 +4040,7 @@ function isCommandShapedVerification(text, allowProductTerms = false) {
   const explicitSyntax =
     hasEnvironment || pathCommand || hasUnambiguousShellSyntax(text);
   if (!commonCommand && !explicitSyntax) return false;
-  if (hasExplicitAiAuthorship(text)) return false;
+  if (hasNonWaivableCommandAttribution(text, allowProductTerms)) return false;
   if (
     !explicitSyntax &&
     /^(?:claude|codex|gemini|opencode)$/u.test(executable ?? "") &&
@@ -4031,11 +4048,7 @@ function isCommandShapedVerification(text, allowProductTerms = false) {
   ) {
     return false;
   }
-  const attributionLike = hasWorkflowAttribution(text);
-  return (
-    !hasAttributedShellComment(text) &&
-    (!attributionLike || (allowProductTerms && explicitSyntax))
-  );
+  return !hasAttributedShellComment(text);
 }
 
 function hasUnambiguousShellSyntax(text) {
@@ -4140,13 +4153,8 @@ function hasShellContinuationMarker(line) {
 function isVerbatimVerificationContinuation(line, allowProductTerms = false) {
   const trimmed = line.trim();
   const option = /^--?[A-Za-z0-9][A-Za-z0-9_-]*(?:=|\s|$)/u.test(trimmed);
-  const productTestOption = /^--?[A-Za-z0-9_-]*(?:test|pattern|grep|filter|match|name)[A-Za-z0-9_-]*(?:=|\s|$)/iu.test(
-    trimmed,
-  );
   return (
-    !hasExplicitAiAuthorship(trimmed) &&
-    (!hasWorkflowAttribution(trimmed) ||
-      (allowProductTerms && productTestOption)) &&
+    !hasNonWaivableCommandAttribution(trimmed, allowProductTerms) &&
     (
       isCommandShapedVerification(trimmed, allowProductTerms) ||
       /^[A-Za-z][A-Za-z0-9]*-[A-Za-z][A-Za-z0-9]*(?:\s|$)/u.test(trimmed) ||

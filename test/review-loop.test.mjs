@@ -925,6 +925,23 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
     ]),
     { model: "managed-openai", model_provider: "openai" },
   );
+  assert.deepEqual(
+    codexReviewPreferencesFromConfigs([
+      {
+        contents:
+          'model_provider = "openai"\nopenai_base_url = "https://shared.example.test"\nmodel_catalog_json = "/shared/models.json"\n[model_providers.openai]\nbase_url = "https://shared.example.test"',
+        file: "system config",
+        retainedForReview: true,
+      },
+      {
+        contents:
+          'review_model = "shared-review"\nmodel_provider = \'openai\'\nopenai_base_url = \'https://shared.example.test\'\nmodel_catalog_json = \'/shared/models.json\'\n[model_providers.openai]\nbase_url = \'https://shared.example.test\'',
+        file: "user config",
+        retainedForReview: false,
+      },
+    ]),
+    { review_model: "shared-review", model_provider: "openai" },
+  );
   assert.throws(
     () =>
       codexReviewPreferencesFromConfigs(
@@ -968,6 +985,31 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
       },
     ),
     { model: "private-review" },
+  );
+  assert.deepEqual(
+    codexReviewPreferencesFromConfigs(
+      [
+        {
+          contents:
+            'profile = "shared"\n[profiles.shared]\nmodel_provider = "private"\n[profiles.shared.model_providers.private]\nbase_url = "https://private.example.test"',
+          file: "system config",
+          retainedForReview: true,
+        },
+        {
+          contents:
+            'profile = "shared"\n[profiles.shared]\nreview_model = "private-review"\nmodel_provider = "private"\n[profiles.shared.model_providers.private]\nbase_url = \'https://private.example.test\'',
+          file: "user config",
+          retainedForReview: false,
+        },
+      ],
+      "layered same-profile legacy transport",
+      {
+        legacyProfiles: true,
+        selectedLegacyProfile: "shared",
+        retainedLegacyProfile: "shared",
+      },
+    ),
+    { review_model: "private-review" },
   );
   assert.deepEqual(
     codexReviewPreferencesFromConfigs(
@@ -2411,6 +2453,22 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     env,
     "check-commit-message",
     "--subject",
+    "Preserve product-domain test selectors",
+    "--body",
+    narrativeCommitBody.replace(
+      "- npm test -- retry\n- npm run validate",
+      '- node --test --test-name-pattern="AI-generated responses retain metadata"',
+    ),
+    "--product-terms",
+    "The command verifies product-domain response metadata",
+  );
+  assert.equal(result.status, 0, result.stderr);
+
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
     "Address Codex review feedback",
     "--body",
     "Apply the requested changes.",
@@ -2514,6 +2572,8 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     '- `echo "Reviewed by Codex"`',
     "- `npm test`\n  --message=Reviewed by Codex",
     "- npm test \\\n  --message=\"Reviewed by Codex\"",
+    '- node --message="Addressed Codex review feedback"',
+    "- codex review inspired this implementation --strict",
   ]) {
     result = invoke(
       directory,
@@ -2529,6 +2589,21 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     assert.equal(result.status, 2, `${attributionBullet}\n${result.stdout}`);
     assert.match(result.stdout, /AI-workflow attribution/u);
   }
+
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
+    "Preserve terminal provider errors",
+    "--body",
+    narrativeCommitBody.replace(
+      "- npm test -- retry",
+      "- codex review inspired this implementation --strict",
+    ),
+  );
+  assert.equal(result.status, 2);
+  assert.match(result.stdout, /AI-workflow attribution/u);
 
   result = invoke(
     directory,
