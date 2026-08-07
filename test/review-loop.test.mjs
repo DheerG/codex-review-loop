@@ -405,6 +405,12 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
   );
   assert.deepEqual(
     codexManagedHazardsFromToml(
+      "[features]\nbrowser_use = true\ncode_mode_host = true\nshell_tool = true",
+    ),
+    ["features.browser_use", "features.code_mode_host"],
+  );
+  assert.deepEqual(
+    codexManagedHazardsFromToml(
       "features.multi_agent_v2 = { enabled = false, max_concurrent_threads_per_session = 2 }",
     ),
     [],
@@ -586,6 +592,12 @@ default_permissions = ":read-only"
     ["remote_sandbox_config"],
   );
   assert.deepEqual(
+    codexRequirementsHazardsFromToml(
+      "features.browser_use = true\nfeatures.unified_exec = true",
+    ),
+    ["features.browser_use"],
+  );
+  assert.deepEqual(
     codexManagedHazardsFromToml(
       '[projects."/tmp/project"]\ntrust_level = "trusted"',
     ),
@@ -653,11 +665,18 @@ hooks                              stable             true
 codex_hooks                        stable             true
 plugin_hooks                       stable             true
 apps                               stable             true
+browser_use                        stable             true
+code_mode_host                     stable             true
 multi_agent                        stable             true
+remote_plugin                      stable             true
+shell_tool                         stable             true
+unified_exec                       stable             true
+obsolete_external_tool             removed            true
 `);
   assert.equal(parsed.get("hooks"), true);
   assert.equal(parsed.get("codex_hooks"), true);
   assert.equal(parsed.get("plugin_hooks"), true);
+  assert.equal(parsed.stages.get("obsolete_external_tool"), "removed");
   assert.equal(parsed.has("multi_agent_v2"), false);
 
   const calls = [];
@@ -673,9 +692,14 @@ multi_agent                        stable             true
           "codex_hooks",
           "plugin_hooks",
           "apps",
+          "browser_use",
+          "code_mode_host",
           "multi_agent_mode",
           "collaboration_modes",
           "enable_fanout",
+          "remote_plugin",
+          "shell_tool",
+          "unified_exec",
         ].map((feature) => [
           feature,
           !requested.includes(feature),
@@ -688,9 +712,12 @@ multi_agent                        stable             true
     "codex_hooks",
     "plugin_hooks",
     "apps",
+    "browser_use",
+    "code_mode_host",
     "multi_agent_mode",
     "collaboration_modes",
     "enable_fanout",
+    "remote_plugin",
   ]);
   assert.deepEqual(calls, [[], disabled]);
   assert.doesNotMatch(codexReviewArgs(false, [], disabled).join(" "), /multi_agent_v2/u);
@@ -712,25 +739,38 @@ multi_agent                        stable             true
   );
 });
 
-test("Codex feature probing preserves authenticated managed identity", () => {
+test("isolated Codex feature probing skips user config without losing invocation identity", () => {
+  const storage = mkdtempSync(path.join(os.tmpdir(), "review-loop-git-state-"));
   const env = {
-    CODEX_HOME: "/authenticated/codex-home",
+    CODEX_HOME: "/authenticated/codex-home-with-malformed-config",
     MANAGED_IDENTITY: "cloud-bundle",
   };
-  const disabled = codexFeaturesForReview(
-    { root: "/tmp/repository", isolateCodexConfig: true },
-    env,
-    "/unused/git-state",
-    (_root, probeEnv, requested = []) => {
-      assert.equal(probeEnv, env);
-      return new Map([
-        ["codex_hooks", !requested.includes("codex_hooks")],
-        ["apps", !requested.includes("apps")],
-        ["multi_agent", !requested.includes("multi_agent")],
-      ]);
-    },
-  );
-  assert.deepEqual(disabled, ["codex_hooks", "apps", "multi_agent"]);
+  let probeHome;
+  try {
+    const disabled = codexFeaturesForReview(
+      { root: "/tmp/repository", isolateCodexConfig: true },
+      env,
+      storage,
+      (_root, probeEnv, requested = []) => {
+        probeHome = probeEnv.CODEX_HOME;
+        assert.notEqual(probeEnv, env);
+        assert.equal(probeEnv.MANAGED_IDENTITY, env.MANAGED_IDENTITY);
+        assert.equal(probeHome.startsWith(storage), true);
+        assert.equal(existsSync(probeHome), true);
+        return new Map([
+          ["codex_hooks", !requested.includes("codex_hooks")],
+          ["apps", !requested.includes("apps")],
+          ["multi_agent", !requested.includes("multi_agent")],
+          ["shell_tool", true],
+        ]);
+      },
+    );
+    assert.deepEqual(disabled, ["codex_hooks", "apps", "multi_agent"]);
+    assert.equal(env.CODEX_HOME, "/authenticated/codex-home-with-malformed-config");
+    assert.equal(existsSync(probeHome), false);
+  } finally {
+    rmSync(storage, { recursive: true, force: true });
+  }
 });
 
 test("doctor reports Codex availability from the target safety preflight", (t) => {
@@ -1610,6 +1650,46 @@ test("legacy base migration preserves immutable revisions and rejects ambiguous 
   assert.equal(result.status, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).state.base, originalParent);
   git(directory, "checkout", "-q", originalBranch);
+
+  let update = execute(
+    "git",
+    [
+      "update-ref",
+      "-m",
+      "create relative legacy base",
+      "refs/heads/relative-base",
+      originalHead,
+    ],
+    directory,
+    { ...process.env, GIT_COMMITTER_DATE: "2000-01-01T00:00:00Z" },
+  );
+  assert.equal(update.status, 0, update.stderr);
+  writeFileSync(path.join(directory, "app.js"), "export const value = 4;\n");
+  git(directory, "add", "app.js");
+  git(directory, "commit", "-qm", "Add later relative value");
+  const laterHead = git(directory, "rev-parse", "HEAD");
+  update = execute(
+    "git",
+    [
+      "update-ref",
+      "-m",
+      "move relative legacy base",
+      "refs/heads/relative-base",
+      laterHead,
+    ],
+    directory,
+    { ...process.env, GIT_COMMITTER_DATE: "2040-01-01T00:00:00Z" },
+  );
+  assert.equal(update.status, 0, update.stderr);
+
+  legacy = JSON.parse(readFileSync(activeFile, "utf8"));
+  legacy.schemaVersion = 2;
+  legacy.base = "relative-base~1";
+  legacy.startedAt = "2020-01-01T00:00:00.000Z";
+  writeFileSync(activeFile, `${JSON.stringify(legacy, null, 2)}\n`);
+  result = invoke(directory, env, "status");
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).state.base, originalParent);
 
   legacy = JSON.parse(readFileSync(activeFile, "utf8"));
   legacy.schemaVersion = 2;

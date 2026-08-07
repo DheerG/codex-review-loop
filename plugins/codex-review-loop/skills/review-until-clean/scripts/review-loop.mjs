@@ -10,6 +10,7 @@ import {
   fstatSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
   openSync,
   readFileSync,
   readSync,
@@ -45,7 +46,26 @@ const CODEX_REVIEW_DISABLED_FEATURES = [
   "guardian_approval",
   "guardianv2",
 ];
+const CODEX_REVIEW_RETAINED_FEATURES = new Set([
+  // These features affect only the model transport or the two local inspection
+  // tools that remain constrained by Codex's native read-only sandbox.
+  "concurrent_reasoning_summaries",
+  "enable_request_compression",
+  "fast_mode",
+  "local_thread_store_compression",
+  "remote_compaction_v2",
+  "responses_websockets",
+  "responses_websockets_v2",
+  "shell_tool",
+  "unified_exec",
+  "use_legacy_landlock",
+  "use_linux_sandbox_bwrap",
+]);
 const SKILL_SCRIPT = fileURLToPath(import.meta.url);
+
+function codexFeatureRequiresIsolation(feature) {
+  return !CODEX_REVIEW_RETAINED_FEATURES.has(feature);
+}
 
 class CliError extends Error {
   constructor(message, exitCode = 2, details = undefined) {
@@ -343,14 +363,28 @@ function pinPersistedBase(root, state) {
     );
   }
   const resolved = resolveBase(root, base);
-  if (base === resolved || isUnambiguousObjectPrefix(root, base, resolved)) {
+  const relative = base.match(
+    /^(?<root>.+?)(?<suffix>(?:(?:~\d*|\^\d*)+))$/u,
+  );
+  const historicalRoot = relative?.groups.root ?? base;
+  const historicalSuffix = relative?.groups.suffix ?? "";
+  const resolvedRoot = relative
+    ? resolveBase(root, historicalRoot)
+    : resolved;
+  if (
+    base === resolved ||
+    isUnambiguousObjectPrefix(root, base, resolved) ||
+    (relative &&
+      (historicalRoot === resolvedRoot ||
+        isUnambiguousObjectPrefix(root, historicalRoot, resolvedRoot)))
+  ) {
     return resolved;
   }
 
   const startedAt = new Date(state.startedAt);
   if (
     !Number.isNaN(startedAt.valueOf()) &&
-    reflogCovers(root, base, startedAt)
+    reflogCovers(root, historicalRoot, startedAt)
   ) {
     const historical = git(
       root,
@@ -358,7 +392,7 @@ function pinPersistedBase(root, state) {
         "rev-parse",
         "--verify",
         "--quiet",
-        `${base}@{${startedAt.toISOString()}}^{commit}`,
+        `${historicalRoot}@{${startedAt.toISOString()}}${historicalSuffix}^{commit}`,
       ],
       { allowFailure: true },
     );
@@ -1182,7 +1216,7 @@ export function codexManagedHazardsFromToml(
     const { parts } = record;
     if (
       parts[0] !== "features" ||
-      !CODEX_REVIEW_DISABLED_FEATURES.includes(parts[1])
+      !codexFeatureRequiresIsolation(parts[1])
     ) {
       continue;
     }
@@ -1319,7 +1353,7 @@ export function codexRequirementsHazardsFromToml(
       hazards.add("remote_sandbox_config");
     } else if (
       key === "features" &&
-      CODEX_REVIEW_DISABLED_FEATURES.includes(child)
+      codexFeatureRequiresIsolation(child)
     ) {
       const value = record.value?.trim();
       if (!["true", "false"].includes(value)) {
@@ -1625,16 +1659,19 @@ export function codexReviewPreferencesForReview(
 
 export function parseCodexFeatureList(output) {
   const features = new Map();
+  const stages = new Map();
   for (const line of output.split(/\r?\n/u)) {
     const match = line
       .trim()
       .match(/^([A-Za-z0-9_-]+)\s+(.+?)\s+(true|false)$/u);
     if (!match) continue;
     features.set(match[1], match[3] === "true");
+    stages.set(match[1], match[2]);
   }
   if (features.size === 0) {
     throw new CliError("Cannot parse the Codex feature inventory.", 3);
   }
+  Object.defineProperty(features, "stages", { value: stages });
   return features;
 }
 
@@ -1664,22 +1701,45 @@ function runCodexFeatureList(root, env, disabledFeatures = []) {
 export function codexFeaturesForReview(
   state,
   env,
-  _storage,
+  storage,
   inventory = runCodexFeatureList,
 ) {
-  const supported = inventory(state.root, env);
-  const disabled = CODEX_REVIEW_DISABLED_FEATURES.filter((feature) =>
-    supported.has(feature),
-  );
-  const effective = inventory(state.root, env, disabled);
-  const active = disabled.filter((feature) => effective.get(feature) !== false);
-  if (active.length > 0) {
-    throw new CliError(
-      `Cannot safely disable managed Codex features: ${active.join(", ")}.`,
-      3,
+  let temporaryHome;
+  let probeEnv = env;
+  if (state.isolateCodexConfig) {
+    const parent = storage ?? os.tmpdir();
+    mkdirSync(parent, { recursive: true });
+    temporaryHome = mkdtempSync(
+      path.join(parent, "codex-feature-inventory-"),
     );
+    // `codex features list` has no --ignore-user-config option. In isolated
+    // mode this clean home is used only to enumerate the binary's static
+    // feature table. Managed layers are inspected with the original env before
+    // this point, and the real reviewer keeps the original CODEX_HOME for auth.
+    probeEnv = { ...env, CODEX_HOME: temporaryHome };
   }
-  return disabled;
+  try {
+    const supported = inventory(state.root, probeEnv);
+    const disabled = [...supported.keys()].filter((feature) =>
+      codexFeatureRequiresIsolation(feature) &&
+      supported.stages?.get(feature) !== "removed",
+    );
+    const effective = inventory(state.root, probeEnv, disabled);
+    const active = disabled.filter(
+      (feature) => effective.get(feature) !== false,
+    );
+    if (active.length > 0) {
+      throw new CliError(
+        `Cannot safely disable managed Codex features: ${active.join(", ")}.`,
+        3,
+      );
+    }
+    return disabled;
+  } finally {
+    if (temporaryHome) {
+      rmSync(temporaryHome, { recursive: true, force: true });
+    }
+  }
 }
 
 export function codexReviewArgs(
