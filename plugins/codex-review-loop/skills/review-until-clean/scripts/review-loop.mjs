@@ -3542,7 +3542,11 @@ function startsWithCommandPath(text) {
 }
 
 function withoutLeadingEnvironmentAssignments(text) {
-  return text.replace(
+  const command = text.replace(
+    /^(?:\/usr\/bin\/)?env(?:\s+(?:--|-[A-Za-z]+|--[A-Za-z][A-Za-z0-9_-]*(?:=\S+)?))*\s+/u,
+    "",
+  );
+  return command.replace(
     /^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"(?:\\.|[^"])*"|'[^']*'|\S+)\s+)+/u,
     "",
   );
@@ -3551,25 +3555,29 @@ function withoutLeadingEnvironmentAssignments(text) {
 function isCommandShapedVerification(text) {
   const shellPrompt = text.match(/^\$\s+(.+)/u);
   if (shellPrompt) {
+    const command = withoutLeadingEnvironmentAssignments(shellPrompt[1]);
     return (
-      !startsWithWorkflowAttribution(shellPrompt[1]) &&
-      !startsWithExplicitAiAuthorship(shellPrompt[1])
+      !startsWithWorkflowAttribution(command) &&
+      !startsWithExplicitAiAuthorship(command)
     );
   }
   const markdownCommand = text.match(/^`([^`]+)`$/u);
   if (markdownCommand) {
+    const command = withoutLeadingEnvironmentAssignments(
+      markdownCommand[1].trim(),
+    );
     return (
-      !startsWithWorkflowAttribution(markdownCommand[1].trim()) &&
-      !startsWithExplicitAiAuthorship(markdownCommand[1].trim())
+      !startsWithWorkflowAttribution(command) &&
+      !startsWithExplicitAiAuthorship(command)
     );
   }
+  const command = withoutLeadingEnvironmentAssignments(text);
   if (
-    startsWithWorkflowAttribution(text) ||
-    startsWithExplicitAiAuthorship(text)
+    startsWithWorkflowAttribution(command) ||
+    startsWithExplicitAiAuthorship(command)
   ) {
     return false;
   }
-  const command = withoutLeadingEnvironmentAssignments(text);
   const hasEnvironment = command !== text;
   const pathCommand = startsWithCommandPath(command);
   const executable = command.match(
@@ -3699,7 +3707,11 @@ const AI_ATTRIBUTION_IDENTITY = new RegExp(
   "iu",
 );
 const AI_ATTRIBUTION_TRAILER_IDENTITY = new RegExp(
-  String.raw`^(?:(?:automated|generative)\s+)?${AI_ATTRIBUTION_IDENTITY_SOURCE}(?:\s+(?:assistant|agent|bot|reviewer|tool|cli|code|codex|developer|claude|gemini|chatgpt|gpt(?:-\d+(?:\.\d+)*)?|sonnet|opus|haiku|pro|max|mini|nano|flash|ultra|preview|thinking|coder|\d+(?:\.\d+)*|\d+[a-z][a-z0-9.]*)){0,4}$`,
+  String.raw`^(?:(?:automated|generative)\s+)?${AI_ATTRIBUTION_IDENTITY_SOURCE}(?:\s+(?:assistant|agent|bot|reviewer|team|tool|cli|code|codex|developer|claude|gemini|chatgpt|gpt(?:-\d+(?:\.\d+)*)?|sonnet|opus|haiku|pro|max|mini|nano|flash|ultra|preview|thinking|coder|\d+(?:\.\d+)*|\d+[a-z][a-z0-9.]*)){0,4}$`,
+  "iu",
+);
+const COMPOSITE_AI_PROVIDER_IDENTITY = new RegExp(
+  String.raw`\b(?:codex|gemini|chatgpt|gpt(?:-\d+(?:\.\d+)*)?|openai|anthropic|opencode|(?:github[\s-]+)?copilot|cursor|windsurf|aider|codeium|tabnine|qodo|amazon\s+q|sourcegraph\s+cody)\b`,
   "iu",
 );
 const EXPLICIT_AI_AUTHORSHIP_PATTERNS = [
@@ -3775,8 +3787,10 @@ function hasAiAttributionTrailer(message) {
       identity,
       identity.replace(/[-_]+/gu, " "),
     ]);
-    return candidates.some((identity) =>
-      AI_ATTRIBUTION_TRAILER_IDENTITY.test(identity),
+    return candidates.some(
+      (identity) =>
+        AI_ATTRIBUTION_TRAILER_IDENTITY.test(identity) ||
+        COMPOSITE_AI_PROVIDER_IDENTITY.test(identity),
     );
   });
 }

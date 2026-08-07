@@ -2154,6 +2154,11 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "- Codex review passed",
     "- Tests suggested by Codex all passed",
     "- codex wrote this code --strict",
+    "- $ FOO=bar Reviewed by Codex",
+    "- `FOO=bar Reviewed by Codex`",
+    "- FOO=bar codex wrote this code --strict",
+    "- env FOO=bar Reviewed by Codex",
+    "- $ env FOO=bar Reviewed by Codex",
   ]) {
     result = invoke(
       directory,
@@ -2726,6 +2731,8 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "Co-authored-by: Codex (OpenAI) <bot@example.com>",
     "Co-authored-by: claude-code[bot] <bot@example.com>",
     "Co-authored-by: ChatGPT-4o <bot@example.com>",
+    "Reviewed-by: Codex Team <team@example.com>",
+    "Signed-off-by: OpenAI Maintainers <maintainers@example.com>",
   ]) {
     result = invoke(
       directory,
