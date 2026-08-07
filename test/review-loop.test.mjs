@@ -599,6 +599,14 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
     [],
   );
   assert.deepEqual(
+    codexManagedHazardsFromToml('permission_profile = ":read-only"'),
+    [],
+  );
+  assert.deepEqual(
+    codexManagedHazardsFromToml('permission_profile = ":workspace-write"'),
+    ["permission_profile"],
+  );
+  assert.deepEqual(
     codexManagedHazardsFromToml('web_search = "disabled"'),
     [],
   );
@@ -732,6 +740,19 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
       },
     ]),
     { model: "gpt-system", model_provider: "openai" },
+  );
+  assert.deepEqual(
+    codexReviewPreferencesFromConfigs([
+      {
+        contents: 'model_provider = "private"',
+        file: "system config",
+      },
+      {
+        contents: 'model_provider = "openai"',
+        file: "user config",
+      },
+    ]),
+    { model_provider: "openai" },
   );
   assert.deepEqual(
     codexReviewPreferencesFromToml(
@@ -1554,6 +1575,39 @@ obsolete_external_tool             removed            true
     { usesReadOnlyDefaultPermissions: true },
   );
   assert.equal(permissionProfileArgs.includes("--sandbox"), false);
+  const activePermissionProfileFeatures = codexFeaturesForReview(
+    {
+      root: "/tmp/repository",
+      isolateCodexConfig: true,
+      codexLegacyProfiles: false,
+    },
+    {},
+    undefined,
+    (_root, _env, requested = []) =>
+      new Map([
+        ["hooks", !requested.includes("hooks")],
+        ["shell_tool", true],
+      ]),
+    () => ({
+      managedConfigs: [
+        {
+          contents: 'permission_profile = ":read-only"',
+          file: "cloud-managed Codex config (permission profile)",
+        },
+      ],
+      requirementsConfigs: [],
+    }),
+  );
+  assert.equal(
+    activePermissionProfileFeatures.usesReadOnlyDefaultPermissions,
+    true,
+  );
+  assert.equal(
+    codexReviewArgs(false, [], activePermissionProfileFeatures, {
+      usesReadOnlyDefaultPermissions: true,
+    }).includes("--sandbox"),
+    false,
+  );
 });
 
 test("isolated Codex feature probing skips user config without losing invocation identity", () => {
@@ -2067,6 +2121,7 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "- Address OpenCode review feedback",
     "- Codex review passed",
     "- Tests suggested by Codex all passed",
+    "- codex wrote this code --strict",
   ]) {
     result = invoke(
       directory,
@@ -2344,6 +2399,8 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "AI co-authored the change.",
     "Claude co-authored the change.",
     "Codex wrote this code.",
+    "Codex wrote this.",
+    "Claude developed this.",
     "Pair programmed with Claude.",
     "AI helped author these changes.",
   ]) {
@@ -2748,6 +2805,7 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "Reviewed by Codex",
     "Reviewer feedback prompted this change",
     "Codex-generated feedback prompted this change",
+    "AI-generated findings informed these changes",
     "Changes were prompted by Codex-generated feedback",
     "Review feedback led to this change",
     "Address GitHub Copilot review feedback",

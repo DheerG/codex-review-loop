@@ -1235,7 +1235,7 @@ function codexReviewPreferencesFromRecords(records, source) {
       configuredModelProviders.add(parts[1]);
     }
   }
-  if (preferences.model || preferences.review_model) {
+  if (preferences.model || preferences.review_model || modelProvider === "openai") {
     const dependencies = [];
     const effectiveModelProvider = modelProvider ?? "openai";
     if (configuredModelProviders.has(effectiveModelProvider)) {
@@ -1243,7 +1243,9 @@ function codexReviewPreferencesFromRecords(records, source) {
     } else if (modelProvider && modelProvider !== "openai") {
       dependencies.push(`model_provider=${JSON.stringify(modelProvider)}`);
     }
-    if (modelCatalog) dependencies.push("model_catalog_json");
+    if ((preferences.model || preferences.review_model) && modelCatalog) {
+      dependencies.push("model_catalog_json");
+    }
     if (openAiBaseUrl && effectiveModelProvider === "openai") {
       dependencies.push("openai_base_url");
     }
@@ -1253,9 +1255,7 @@ function codexReviewPreferencesFromRecords(records, source) {
         3,
       );
     }
-    if (modelProvider === "openai") {
-      preferences.model_provider = modelProvider;
-    }
+    if (modelProvider === "openai") preferences.model_provider = modelProvider;
   }
   return preferences;
 }
@@ -1428,7 +1428,10 @@ export function codexManagedHazardsFromToml(
     } else if (parts.length === 1 && parts[0] === "sandbox_mode") {
       const value = tomlStringValue(record.value ?? "", source);
       if (value !== "read-only") hazards.add(parts[0]);
-    } else if (parts.length === 1 && parts[0] === "default_permissions") {
+    } else if (
+      parts.length === 1 &&
+      ["default_permissions", "permission_profile"].includes(parts[0])
+    ) {
       const value = tomlStringValue(record.value ?? "", source);
       // Unprefixed permission names may resolve to a user-defined profile.
       // Only Codex's built-in read-only profile is safe to accept here.
@@ -1479,6 +1482,11 @@ export function codexApprovalHazardsFromToml(
       if (tomlStringValue(record.value ?? "", source) !== "user") {
         hazards.add("approvals_reviewer");
       }
+    } else if (
+      parts[0] === "permission_profile" &&
+      tomlStringValue(record.value ?? "", source) !== ":read-only"
+    ) {
+      hazards.add("permission_profile");
     }
   }
   return [...hazards].sort();
@@ -1569,7 +1577,7 @@ export function codexRequirementsHazardsFromToml(
   return [...hazards].sort();
 }
 
-function codexUsesReadOnlyDefaultPermissions(
+function codexUsesReadOnlyPermissions(
   contents,
   source,
   options = {},
@@ -1585,7 +1593,9 @@ function codexUsesReadOnlyDefaultPermissions(
   ).some(
     (record) =>
       record.parts.length === 1 &&
-      record.parts[0] === "default_permissions" &&
+      ["default_permissions", "permission_profile"].includes(
+        record.parts[0],
+      ) &&
       tomlStringValue(record.value ?? "", source) === ":read-only",
   );
 }
@@ -2434,7 +2444,7 @@ function assertCloudCodexConfigurationSafe(
     ...cloudConfigs,
     ...(inventory.requirementsConfigs ?? []),
   ].some((config) =>
-    codexUsesReadOnlyDefaultPermissions(
+    codexUsesReadOnlyPermissions(
       config.contents,
       config.file,
       configOptions,
@@ -3403,7 +3413,7 @@ const PRODUCT_PROVENANCE_CAUSAL_PATTERNS = PRODUCT_PROVENANCE_SOURCES.flatMap(
       "iu",
     ),
     new RegExp(
-      String.raw`${source}.{0,40}\b(?:prompted|caused|drove|motivated|triggered|led\s+to|resulted\s+in)\s+(?:(?:this|the|these)\s+)?(?:changes?|code|implementation|commits?|patch|work)\b`,
+      String.raw`${source}.{0,40}\b(?:prompted|caused|drove|motivated|triggered|informed|guided|led\s+to|resulted\s+in)\s+(?:(?:this|the|these)\s+)?(?:changes?|code|implementation|commits?|patch|work)\b`,
       "iu",
     ),
     new RegExp(
@@ -3505,12 +3515,25 @@ function withoutLeadingEnvironmentAssignments(text) {
 
 function isCommandShapedVerification(text) {
   const shellPrompt = text.match(/^\$\s+(.+)/u);
-  if (shellPrompt) return !startsWithWorkflowAttribution(shellPrompt[1]);
+  if (shellPrompt) {
+    return (
+      !startsWithWorkflowAttribution(shellPrompt[1]) &&
+      !startsWithExplicitAiAuthorship(shellPrompt[1])
+    );
+  }
   const markdownCommand = text.match(/^`([^`]+)`$/u);
   if (markdownCommand) {
-    return !startsWithWorkflowAttribution(markdownCommand[1].trim());
+    return (
+      !startsWithWorkflowAttribution(markdownCommand[1].trim()) &&
+      !startsWithExplicitAiAuthorship(markdownCommand[1].trim())
+    );
   }
-  if (startsWithWorkflowAttribution(text)) return false;
+  if (
+    startsWithWorkflowAttribution(text) ||
+    startsWithExplicitAiAuthorship(text)
+  ) {
+    return false;
+  }
   const command = withoutLeadingEnvironmentAssignments(text);
   const hasEnvironment = command !== text;
   const pathCommand = startsWithCommandPath(command);
@@ -3665,6 +3688,10 @@ const PRODUCT_EXCEPTION_AI_AUTHORSHIP_PATTERNS = [
     "iu",
   ),
   new RegExp(
+    String.raw`\b${AI_ATTRIBUTION_IDENTITY_SOURCE}\b.{0,50}\b${AI_AUTHORSHIP_ACTION_SOURCE}\b.{0,20}\b(?:this|that|it|these|those)\b`,
+    "iu",
+  ),
+  new RegExp(
     String.raw`\b(?:pair[ -]?programmed|co[ -]?authored|authored|help(?:ed|s|ing)?\s+(?:to\s+)?author)\b.{0,50}\b(?:by|with|using|via|from)?\s*(?:(?:an?|the)\s+)?${AI_ATTRIBUTION_IDENTITY_SOURCE}\b`,
     "iu",
   ),
@@ -3679,6 +3706,12 @@ function hasExplicitAiAuthorship(text, productException = false) {
     ? PRODUCT_EXCEPTION_AI_AUTHORSHIP_PATTERNS
     : EXPLICIT_AI_AUTHORSHIP_PATTERNS;
   return patterns.some((pattern) => pattern.test(text));
+}
+
+function startsWithExplicitAiAuthorship(text) {
+  return EXPLICIT_AI_AUTHORSHIP_PATTERNS.some(
+    (pattern) => pattern.exec(text)?.index === 0,
+  );
 }
 
 function hasAiAttributionTrailer(message) {
