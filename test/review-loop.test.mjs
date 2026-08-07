@@ -1184,6 +1184,30 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     assert.match(result.stdout, /AI-workflow attribution/u);
   }
 
+  for (const attribution of [
+    "Changes generated using AI",
+    "Changes produced by artificial intelligence",
+    "Changes authored with GitHub Copilot",
+  ]) {
+    result = invoke(
+      directory,
+      env,
+      "check-commit-message",
+      "--subject",
+      "Describe artifact provenance",
+      "--body",
+      attribution,
+      "--policy",
+      "Repository-specific commit format",
+      "--policy-overrides",
+      "all",
+      "--product-terms",
+      "The repository implements reviewer-provider behavior",
+    );
+    assert.equal(result.status, 2, `${attribution}\n${result.stdout}`);
+    assert.match(result.stdout, /AI-workflow attribution/u);
+  }
+
   for (const productSubject of [
     "Implement request validation",
     "Fix feedback submission",

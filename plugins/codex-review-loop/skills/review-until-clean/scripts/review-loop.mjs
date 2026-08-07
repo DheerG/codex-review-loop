@@ -2297,7 +2297,10 @@ const WORKFLOW_ATTRIBUTION_PATTERNS = [
 ];
 
 function hasAttribution(text, allowProductTerms) {
-  if (WORKFLOW_ATTRIBUTION_PATTERNS.some((pattern) => pattern.test(text))) {
+  if (
+    hasExplicitAiAuthorship(text) ||
+    WORKFLOW_ATTRIBUTION_PATTERNS.some((pattern) => pattern.test(text))
+  ) {
     return true;
   }
   return (
@@ -2341,7 +2344,10 @@ function isVerbatimVerificationCommand(line) {
 }
 
 function hasWorkflowAttribution(text) {
-  return WORKFLOW_ATTRIBUTION_PATTERNS.some((pattern) => pattern.test(text));
+  return (
+    hasExplicitAiAuthorship(text) ||
+    WORKFLOW_ATTRIBUTION_PATTERNS.some((pattern) => pattern.test(text))
+  );
 }
 
 function startsWithWorkflowAttribution(text) {
@@ -2453,8 +2459,26 @@ function longCommitProseLine(body) {
   );
 }
 
-const AI_ATTRIBUTION_IDENTITY =
-  /\b(?:ai|artificial intelligence|llm|language model|assistant|agent|bot|reviewer|codex|claude|gemini|chatgpt|gpt(?:-\d+(?:\.\d+)*)?|openai|anthropic|opencode|(?:github\s+)?copilot|cursor|windsurf|aider|devin|codeium|tabnine|qodo|amazon\s+q|sourcegraph\s+cody)\b/iu;
+const AI_ATTRIBUTION_IDENTITY_SOURCE = String.raw`(?:ai|artificial intelligence|llm|language model|assistant|agent|bot|reviewer|codex|claude|gemini|chatgpt|gpt(?:-\d+(?:\.\d+)*)?|openai|anthropic|opencode|(?:github\s+)?copilot|cursor|windsurf|aider|devin|codeium|tabnine|qodo|amazon\s+q|sourcegraph\s+cody)`;
+const AI_AUTHORSHIP_ACTION_SOURCE = String.raw`(?:reviewed|generated|suggested|assisted|authored|co[ -]?authored|written|created|made|produced)`;
+const AI_ATTRIBUTION_IDENTITY = new RegExp(
+  String.raw`\b${AI_ATTRIBUTION_IDENTITY_SOURCE}\b`,
+  "iu",
+);
+const EXPLICIT_AI_AUTHORSHIP_PATTERNS = [
+  new RegExp(
+    String.raw`\b${AI_AUTHORSHIP_ACTION_SOURCE}\b.{0,50}\b(?:by|with|using|via|from)\s+(?:(?:an?|the)\s+)?${AI_ATTRIBUTION_IDENTITY_SOURCE}\b`,
+    "iu",
+  ),
+  new RegExp(
+    String.raw`\b${AI_ATTRIBUTION_IDENTITY_SOURCE}\b[\s-]+${AI_AUTHORSHIP_ACTION_SOURCE}\b`,
+    "iu",
+  ),
+];
+
+function hasExplicitAiAuthorship(text) {
+  return EXPLICIT_AI_AUTHORSHIP_PATTERNS.some((pattern) => pattern.test(text));
+}
 
 function hasAiAttributionTrailer(message) {
   const trailers = message.matchAll(
