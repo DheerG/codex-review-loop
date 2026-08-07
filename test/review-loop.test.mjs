@@ -29,6 +29,7 @@ import {
   codexSelectedLegacyProfileFromConfigs,
   codexSelectedLegacyProfileFromToml,
   inspectCommitMessage,
+  parseCodexCloudBundleCache,
   parseReview,
   parseCodexFeatureList,
   readBoundedCodexConfig,
@@ -667,6 +668,35 @@ test("Codex config reads reject oversized and non-regular inputs", (t) => {
 });
 
 test("Codex feature probing adapts to supported flags and fails closed", () => {
+  const cloudBundle = parseCodexCloudBundleCache(
+    JSON.stringify({
+      signed_payload: {
+        bundle: {
+          config_toml: {
+            enterprise_managed: [
+              { name: "managed", contents: "features.hooks = false" },
+            ],
+          },
+          requirements_toml: {
+            enterprise_managed: [
+              {
+                name: "requirements",
+                contents: 'default_permissions = ":read-only"',
+              },
+            ],
+          },
+        },
+      },
+    }),
+  );
+  assert.equal(cloudBundle.managedConfigs[0].contents, "features.hooks = false");
+  assert.match(cloudBundle.managedConfigs[0].file, /managed/u);
+  assert.match(cloudBundle.requirementsConfigs[0].file, /requirements/u);
+  assert.throws(
+    () => parseCodexCloudBundleCache('{"signed_payload":{}}'),
+    /Cannot parse the Codex cloud configuration cache/u,
+  );
+
   const parsed = parseCodexFeatureList(`
 hooks                              stable             true
 codex_hooks                        stable             true
@@ -713,6 +743,7 @@ obsolete_external_tool             removed            true
         ]),
       );
     },
+    () => ({ managedConfigs: [], requirementsConfigs: [] }),
   );
   assert.deepEqual(disabled, [
     "hooks",
@@ -741,9 +772,95 @@ obsolete_external_tool             removed            true
             ["apps", !requested.includes("apps")],
             ["multi_agent", !requested.includes("multi_agent")],
           ]),
+        () => ({ managedConfigs: [], requirementsConfigs: [] }),
       ),
     /Cannot safely disable managed Codex features: hooks/u,
   );
+
+  assert.throws(
+    () =>
+      codexFeaturesForReview(
+        {
+          root: "/tmp/repository",
+          isolateCodexConfig: true,
+          codexLegacyProfiles: false,
+        },
+        {},
+        undefined,
+        (_root, _env, requested = []) =>
+          new Map([
+            ["hooks", !requested.includes("hooks")],
+            ["shell_tool", true],
+          ]),
+        () => ({
+          managedConfigs: [
+            {
+              contents: "features.hooks = true",
+              file: "cloud-managed Codex config (policy)",
+            },
+          ],
+          requirementsConfigs: [],
+        }),
+      ),
+    /cloud-managed Codex config.*features\.hooks/u,
+  );
+
+  assert.throws(
+    () =>
+      codexFeaturesForReview(
+        {
+          root: "/tmp/repository",
+          isolateCodexConfig: true,
+          codexLegacyProfiles: false,
+        },
+        {},
+        undefined,
+        (_root, _env, requested = []) =>
+          new Map([
+            ["hooks", !requested.includes("hooks")],
+            ["shell_tool", true],
+          ]),
+        () => ({
+          managedConfigs: [
+            {
+              contents:
+                '[mcp_servers.writer]\ncommand = "writes-to-the-repository"',
+              file: "cloud-managed Codex config (transport)",
+            },
+          ],
+          requirementsConfigs: [],
+        }),
+      ),
+    /Cannot safely override MCP servers from cloud-managed Codex config/u,
+  );
+
+  const permissionProfileFeatures = codexFeaturesForReview(
+    { root: "/tmp/repository", isolateCodexConfig: true },
+    {},
+    undefined,
+    (_root, _env, requested = []) =>
+      new Map([
+        ["hooks", !requested.includes("hooks")],
+        ["shell_tool", true],
+      ]),
+    () => ({
+      managedConfigs: [],
+      requirementsConfigs: [
+        {
+          contents: 'default_permissions = ":read-only"',
+          file: "cloud-managed Codex requirements (policy)",
+        },
+      ],
+    }),
+  );
+  assert.equal(permissionProfileFeatures.usesReadOnlyDefaultPermissions, true);
+  const permissionProfileArgs = codexReviewArgs(
+    false,
+    [],
+    permissionProfileFeatures,
+    { usesReadOnlyDefaultPermissions: true },
+  );
+  assert.equal(permissionProfileArgs.includes("--sandbox"), false);
 });
 
 test("isolated Codex feature probing skips user config without losing invocation identity", () => {
@@ -770,6 +887,11 @@ test("isolated Codex feature probing skips user config without losing invocation
           ["multi_agent", !requested.includes("multi_agent")],
           ["shell_tool", true],
         ]);
+      },
+      (_root, probeEnv, temporaryHome, requested) => {
+        assert.equal(probeEnv.CODEX_HOME, temporaryHome);
+        assert.deepEqual(requested, ["codex_hooks", "apps", "multi_agent"]);
+        return { managedConfigs: [], requirementsConfigs: [] };
       },
     );
     assert.deepEqual(disabled, ["codex_hooks", "apps", "multi_agent"]);
@@ -1035,6 +1157,20 @@ test("check-commit-message validates a proposed repair commit", (t) => {
   assert.equal(result.status, 2);
   assert.match(result.stdout, /AI-workflow attribution/u);
 
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
+    "Keep prose after escaped command markers visible",
+    "--body",
+    `${narrativeCommitBody}\n${"- npm test " + "\\\\"}\n  Reviewed by Codex`,
+    "--product-terms",
+    "The repository implements reviewer-provider behavior",
+  );
+  assert.equal(result.status, 2);
+  assert.match(result.stdout, /AI-workflow attribution/u);
+
   const longContinuation = `  --test-name-pattern="${"preserve exact provider evidence ".repeat(5).trim()}"`;
   result = invoke(
     directory,
@@ -1256,6 +1392,41 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     assert.equal(result.status, 2, `${attribution}\n${result.stdout}`);
     assert.match(result.stdout, /AI-workflow attribution/u);
   }
+
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
+    "Preserve finding metadata",
+    "--body",
+    "Reviewer-generated findings retain metadata.",
+    "--policy",
+    "Repository-specific commit format",
+    "--policy-overrides",
+    "all",
+    "--product-terms",
+    "The repository implements reviewer-provider behavior",
+  );
+  assert.equal(result.status, 0, result.stdout);
+
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
+    "Describe commit metadata",
+    "--body",
+    "Reviewer-generated commits retain metadata.",
+    "--policy",
+    "Repository-specific commit format",
+    "--policy-overrides",
+    "all",
+    "--product-terms",
+    "The repository implements reviewer-provider behavior",
+  );
+  assert.equal(result.status, 2);
+  assert.match(result.stdout, /AI-workflow attribution/u);
 
   for (const productSubject of [
     "Implement request validation",

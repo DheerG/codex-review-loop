@@ -31,6 +31,8 @@ const DEFAULT_FALLBACK_MAX_ROUNDS = 15;
 const DEFAULT_TIMEOUT_MS = 1_200_000;
 const MAX_CAPTURE_BYTES = 64 * 1024 * 1024;
 const MAX_CODEX_CONFIG_BYTES = 1024 * 1024;
+const MAX_CODEX_IDENTITY_BYTES = 4 * 1024 * 1024;
+const MAX_CODEX_CLOUD_CACHE_BYTES = 16 * 1024 * 1024;
 const DEFAULT_COMMIT_SECTIONS = ["Failure", "Change", "Verification"];
 const CODEX_REVIEW_DISABLED_FEATURES = [
   "hooks",
@@ -170,6 +172,59 @@ export function readBoundedCodexConfig(file) {
       `Cannot safely read Codex configuration at ${file}: ${error.message}`,
       3,
     );
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+}
+
+function readBoundedCodexRuntimeFile(file, maximumBytes, label) {
+  let before;
+  try {
+    before = lstatSync(file);
+  } catch (error) {
+    throw new CliError(
+      `Cannot safely inspect ${label} at ${file}: ${error.message}`,
+      3,
+    );
+  }
+  if (before.isSymbolicLink() || !before.isFile()) {
+    throw new CliError(`${label} must be a regular non-symlink file: ${file}.`, 3);
+  }
+  if (before.size > maximumBytes) {
+    throw new CliError(`${label} exceeds ${maximumBytes} bytes: ${file}.`, 3);
+  }
+
+  let descriptor;
+  try {
+    descriptor = openSync(file, constants.O_RDONLY);
+    const opened = fstatSync(descriptor);
+    if (
+      !opened.isFile() ||
+      opened.dev !== before.dev ||
+      opened.ino !== before.ino
+    ) {
+      throw new CliError(`${label} changed while it was inspected: ${file}.`, 3);
+    }
+    const buffer = Buffer.alloc(maximumBytes + 1);
+    let total = 0;
+    while (total < buffer.length) {
+      const count = readSync(
+        descriptor,
+        buffer,
+        total,
+        buffer.length - total,
+        null,
+      );
+      if (count === 0) break;
+      total += count;
+    }
+    if (total > maximumBytes) {
+      throw new CliError(`${label} exceeds ${maximumBytes} bytes: ${file}.`, 3);
+    }
+    return buffer.subarray(0, total);
+  } catch (error) {
+    if (error instanceof CliError) throw error;
+    throw new CliError(`Cannot safely read ${label} at ${file}: ${error.message}`, 3);
   } finally {
     if (descriptor !== undefined) closeSync(descriptor);
   }
@@ -1391,6 +1446,34 @@ export function codexRequirementsHazardsFromToml(
   return [...hazards].sort();
 }
 
+function codexUsesReadOnlyDefaultPermissions(
+  contents,
+  source,
+  options = {},
+) {
+  const { records, selectedLegacyProfile } = codexConfigRecords(
+    contents,
+    source,
+  );
+  return effectiveCodexRecords(
+    records,
+    options,
+    selectedLegacyProfile,
+  ).some(
+    (record) =>
+      record.parts.length === 1 &&
+      record.parts[0] === "default_permissions" &&
+      tomlStringValue(record.value ?? "", source) === ":read-only",
+  );
+}
+
+function withCodexIsolationMetadata(values, metadata) {
+  for (const [key, value] of Object.entries(metadata)) {
+    Object.defineProperty(values, key, { value, enumerable: false });
+  }
+  return values;
+}
+
 function codexHome(env) {
   return path.resolve(env.CODEX_HOME ?? path.join(os.homedir(), ".codex"));
 }
@@ -1625,10 +1708,20 @@ function configuredCodexMcpServers(state, env) {
       selectedLegacyProfile,
     );
   }
-  // Codex loads cloud data as ConfigRequirements. Its MCP entries are identity
-  // constraints applied to configured servers; they can disable a transport
-  // but cannot define or add one.
-  return [...names].sort();
+  const usesReadOnlyDefaultPermissions = [
+    ...ordinaryConfigs,
+    ...requirementsConfigs,
+    ...managedConfigs,
+  ].some((config) =>
+    codexUsesReadOnlyDefaultPermissions(
+      config.contents,
+      config.file,
+      options,
+    ),
+  );
+  return withCodexIsolationMetadata([...names].sort(), {
+    usesReadOnlyDefaultPermissions,
+  });
 }
 
 function configuredCodexReviewPreferences(state, env) {
@@ -1719,26 +1812,186 @@ function runCodexFeatureList(root, env, disabledFeatures = []) {
   return parseCodexFeatureList(result.stdout);
 }
 
+function copyCodexIdentityForProbe(sourceEnv, temporaryHome) {
+  const source = path.join(codexHome(sourceEnv), "auth.json");
+  if (!existsSync(source)) return;
+  const identity = readBoundedCodexRuntimeFile(
+    source,
+    MAX_CODEX_IDENTITY_BYTES,
+    "Codex authentication identity",
+  );
+  writeFileSync(path.join(temporaryHome, "auth.json"), identity, {
+    flag: "wx",
+    mode: 0o600,
+  });
+}
+
+function cloudFragments(bundle, key, label) {
+  const fragments = bundle?.[key]?.enterprise_managed;
+  if (fragments === undefined || fragments === null) return [];
+  if (!Array.isArray(fragments)) {
+    throw new CliError(`Cannot parse ${label} in the Codex cloud bundle.`, 3);
+  }
+  return fragments.map((fragment, index) => {
+    if (
+      !fragment ||
+      typeof fragment !== "object" ||
+      typeof fragment.contents !== "string"
+    ) {
+      throw new CliError(`Cannot parse ${label} in the Codex cloud bundle.`, 3);
+    }
+    if (Buffer.byteLength(fragment.contents, "utf8") > MAX_CODEX_CONFIG_BYTES) {
+      throw new CliError(
+        `${label} fragment ${index + 1} exceeds ${MAX_CODEX_CONFIG_BYTES} bytes.`,
+        3,
+      );
+    }
+    const name =
+      typeof fragment.name === "string" && fragment.name.trim()
+        ? fragment.name.trim()
+        : `fragment ${index + 1}`;
+    return {
+      contents: fragment.contents,
+      file: `${label} (${name})`,
+    };
+  });
+}
+
+export function parseCodexCloudBundleCache(contents) {
+  let parsed;
+  try {
+    parsed = JSON.parse(contents);
+  } catch (error) {
+    throw new CliError(
+      `Cannot parse the Codex cloud configuration cache: ${error.message}`,
+      3,
+    );
+  }
+  const bundle = parsed?.signed_payload?.bundle;
+  if (!bundle || typeof bundle !== "object") {
+    throw new CliError("Cannot parse the Codex cloud configuration cache.", 3);
+  }
+  return {
+    managedConfigs: cloudFragments(
+      bundle,
+      "config_toml",
+      "cloud-managed Codex config",
+    ),
+    requirementsConfigs: cloudFragments(
+      bundle,
+      "requirements_toml",
+      "cloud-managed Codex requirements",
+    ),
+  };
+}
+
+function readCodexCloudBundle(temporaryHome) {
+  const cache = path.join(temporaryHome, "cloud-config-bundle-cache.json");
+  if (!existsSync(cache)) {
+    return { managedConfigs: [], requirementsConfigs: [] };
+  }
+  const bytes = readBoundedCodexRuntimeFile(
+    cache,
+    MAX_CODEX_CLOUD_CACHE_BYTES,
+    "Codex cloud configuration cache",
+  );
+  return parseCodexCloudBundleCache(bytes.toString("utf8"));
+}
+
+function runCodexManagedConfigProbe(
+  root,
+  env,
+  temporaryHome,
+  disabledFeatures,
+) {
+  const missingSchema = path.join(
+    temporaryHome,
+    "configuration-preflight-output-schema-must-not-exist.json",
+  );
+  const args = [
+    "--ask-for-approval",
+    "never",
+    "exec",
+    "--ignore-user-config",
+    "--ignore-rules",
+    "-c",
+    codexProjectUntrustedOverride(root),
+  ];
+  for (const feature of disabledFeatures) args.push("--disable", feature);
+  args.push(
+    "-c",
+    "notify=[]",
+    "--ephemeral",
+    "--output-schema",
+    missingSchema,
+    "configuration preflight",
+  );
+  const result = run("codex", args, {
+    cwd: root,
+    env,
+    allowFailure: true,
+  });
+  const detail = `${result.stderr}\n${result.stdout}`;
+  if (
+    result.status === 0 ||
+    !detail.includes("Failed to read output schema file") ||
+    !detail.includes(path.basename(missingSchema))
+  ) {
+    throw new CliError(
+      `Cannot validate Codex's authenticated managed configuration${detail.trim() ? `: ${detail.trim()}` : ""}.`,
+      3,
+    );
+  }
+  return readCodexCloudBundle(temporaryHome);
+}
+
+function assertCloudCodexConfigurationSafe(state, env, inventory) {
+  const cloudConfigs = inventory.managedConfigs ?? [];
+  const legacyProfiles =
+    cloudConfigs.length === 0
+      ? false
+      : Object.hasOwn(state, "codexLegacyProfiles")
+        ? Boolean(state.codexLegacyProfiles)
+        : codexUsesLegacyProfiles(state, env);
+  const selectedLegacyProfile = legacyProfiles
+    ? codexSelectedLegacyProfileFromConfigs(cloudConfigs)
+    : null;
+  for (const config of cloudConfigs) {
+    assertManagedCodexConfigSafe(
+      config.contents,
+      config.file,
+      legacyProfiles,
+      selectedLegacyProfile,
+    );
+  }
+  for (const config of inventory.requirementsConfigs ?? []) {
+    assertCodexRequirementsSafe(config.contents, config.file);
+  }
+  const options = { legacyProfiles, selectedLegacyProfile };
+  return [...cloudConfigs, ...(inventory.requirementsConfigs ?? [])].some(
+    (config) =>
+      codexUsesReadOnlyDefaultPermissions(
+        config.contents,
+        config.file,
+        options,
+      ),
+  );
+}
+
 export function codexFeaturesForReview(
   state,
   env,
   storage,
   inventory = runCodexFeatureList,
+  managedInventory = runCodexManagedConfigProbe,
+  options = {},
 ) {
   let temporaryHome;
-  let probeEnv = env;
-  if (state.isolateCodexConfig) {
-    const parent = storage ?? os.tmpdir();
-    mkdirSync(parent, { recursive: true });
-    temporaryHome = mkdtempSync(
-      path.join(parent, "codex-feature-inventory-"),
-    );
-    // `codex features list` has no --ignore-user-config option. In isolated
-    // mode this clean home is used only to enumerate the binary's static
-    // feature table. Managed layers are inspected with the original env before
-    // this point, and the real reviewer keeps the original CODEX_HOME for auth.
-    probeEnv = { ...env, CODEX_HOME: temporaryHome };
-  }
+  let retained = false;
+  const parent = storage ?? os.tmpdir();
+  mkdirSync(parent, { recursive: true });
+  temporaryHome = mkdtempSync(path.join(parent, "codex-feature-inventory-"));
+  const probeEnv = { ...env, CODEX_HOME: temporaryHome };
   try {
     const supported = inventory(state.root, probeEnv);
     const disabled = [...supported.keys()].filter((feature) =>
@@ -1755,9 +2008,27 @@ export function codexFeaturesForReview(
         3,
       );
     }
-    return disabled;
+    if (managedInventory === runCodexManagedConfigProbe) {
+      copyCodexIdentityForProbe(env, temporaryHome);
+    }
+    const authenticated = managedInventory(
+      state.root,
+      probeEnv,
+      temporaryHome,
+      disabled,
+    );
+    const usesReadOnlyDefaultPermissions = assertCloudCodexConfigurationSafe(
+      state,
+      probeEnv,
+      authenticated,
+    );
+    retained = Boolean(options.retainHome);
+    return withCodexIsolationMetadata(disabled, {
+      codexHome: retained ? temporaryHome : null,
+      usesReadOnlyDefaultPermissions,
+    });
   } finally {
-    if (temporaryHome) {
+    if (temporaryHome && !retained) {
       rmSync(temporaryHome, { recursive: true, force: true });
     }
   }
@@ -1777,13 +2048,14 @@ export function codexReviewArgs(
     "--ask-for-approval",
     "never",
     "exec",
-    "--sandbox",
-    "read-only",
     "--ignore-user-config",
     "--ignore-rules",
     "-c",
     codexProjectUntrustedOverride(reviewConfig.root ?? process.cwd()),
   ];
+  if (!reviewConfig.usesReadOnlyDefaultPermissions) {
+    args.splice(3, 0, "--sandbox", "read-only");
+  }
   const reviewModel = preferences.review_model ?? preferences.model;
   if (reviewModel) args.push("--model", reviewModel);
   if (preferences.model_reasoning_effort) {
@@ -1813,16 +2085,30 @@ function providerInvocation(state, prompt, env, repo) {
         state,
         env,
         repo.storage,
+        runCodexFeatureList,
+        runCodexManagedConfigProbe,
+        { retainHome: true },
       );
+      const temporaryHome = disabledFeatures.codexHome;
       return {
         command: "codex",
         args: codexReviewArgs(
           Boolean(state.isolateCodexConfig),
           mcpServers,
           disabledFeatures,
-          { root: state.root, preferences },
+          {
+            root: state.root,
+            preferences,
+            usesReadOnlyDefaultPermissions: Boolean(
+              mcpServers.usesReadOnlyDefaultPermissions ||
+                disabledFeatures.usesReadOnlyDefaultPermissions,
+            ),
+          },
         ),
         input: prompt,
+        env: { ...env, CODEX_HOME: temporaryHome },
+        cleanup: () =>
+          rmSync(temporaryHome, { recursive: true, force: true }),
       };
     }
     case "gemini":
@@ -1865,6 +2151,8 @@ function captureProcess(invocation, options) {
     let capturedBytes = 0;
     let settled = false;
     let timedOut = false;
+    let forcedKind = null;
+    let killTimer;
     const child = spawn(invocation.command, invocation.args, {
       cwd: options.cwd,
       env: options.env,
@@ -1876,18 +2164,22 @@ function captureProcess(invocation, options) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearTimeout(killTimer);
       resolve(value);
     };
+    const terminate = () => {
+      if (killTimer) return;
+      child.kill("SIGTERM");
+      killTimer = setTimeout(() => child.kill("SIGKILL"), 2_000);
+      killTimer.unref();
+    };
     const append = (kind, chunk) => {
+      if (forcedKind) return;
       capturedBytes += chunk.length;
       if (capturedBytes > MAX_CAPTURE_BYTES) {
-        child.kill("SIGTERM");
-        finish({
-          ok: false,
-          kind: "output_limit",
-          stdout,
-          stderr: `${stderr}\nProvider output exceeded ${MAX_CAPTURE_BYTES} bytes.`,
-        });
+        forcedKind = "output_limit";
+        stderr = `${stderr}\nProvider output exceeded ${MAX_CAPTURE_BYTES} bytes.`;
+        terminate();
         return;
       }
       if (kind === "stdout") stdout += chunk.toString("utf8");
@@ -1905,7 +2197,9 @@ function captureProcess(invocation, options) {
       }),
     );
     child.on("close", (code, signal) => {
-      if (timedOut) {
+      if (forcedKind) {
+        finish({ ok: false, kind: forcedKind, stdout, stderr });
+      } else if (timedOut) {
         finish({ ok: false, kind: "timeout", stdout, stderr });
       } else {
         finish({ ok: code === 0, code, signal, stdout, stderr });
@@ -1914,8 +2208,7 @@ function captureProcess(invocation, options) {
 
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGTERM");
-      setTimeout(() => child.kill("SIGKILL"), 2_000).unref();
+      terminate();
     }, options.timeoutMs);
     timer.unref();
 
@@ -2218,11 +2511,16 @@ async function reviewCommand(repo, env) {
   };
   saveActive(repo, state);
 
-  const result = await captureProcess(invocation, {
-    cwd: repo.root,
-    env,
-    timeoutMs,
-  });
+  let result;
+  try {
+    result = await captureProcess(invocation, {
+      cwd: repo.root,
+      env: invocation.env ?? env,
+      timeoutMs,
+    });
+  } finally {
+    invocation.cleanup?.();
+  }
   const rawFile = roundFile(repo, state, state.round);
   mkdirSync(path.dirname(rawFile), { recursive: true });
   const rawCapture = `${result.stdout ?? ""}${
@@ -2377,10 +2675,21 @@ const WORKFLOW_ATTRIBUTION_PATTERNS = [
   /\breview(?:er)?[ -]?round\s*#?\d+\b/iu,
 ];
 
+const PRODUCT_PROVENANCE_PATTERN = new RegExp(
+  String.raw`\b(?:ai|llm|reviewer|codex|claude|gemini|chatgpt|gpt(?:-\d+(?:\.\d+)*)?|openai|anthropic|opencode|(?:github\s+)?copilot)[\s-]+(?:generated|authored|written|created|produced)\s+(?:review\s+)?(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance|reviews?|outputs?|results?|reports?|metadata|artifacts?|records?|events?|diagnostics?)\b`,
+  "giu",
+);
+
+function attributionProse(text, allowProductTerms) {
+  if (!allowProductTerms) return text;
+  return text.replace(PRODUCT_PROVENANCE_PATTERN, "product artifact");
+}
+
 function hasAttribution(text, allowProductTerms) {
+  const prose = attributionProse(text, allowProductTerms);
   if (
-    hasExplicitAiAuthorship(text) ||
-    WORKFLOW_ATTRIBUTION_PATTERNS.some((pattern) => pattern.test(text))
+    hasExplicitAiAuthorship(prose) ||
+    WORKFLOW_ATTRIBUTION_PATTERNS.some((pattern) => pattern.test(prose))
   ) {
     return true;
   }
@@ -2518,9 +2827,18 @@ function verificationEvidenceLines(body, anySection = false) {
 function hasShellContinuationMarker(line) {
   const trimmed = line.trimEnd();
   const backticks = trimmed.match(/`/gu)?.length ?? 0;
+  const trailingBackslashes = trimmed.match(/\\+$/u)?.[0].length ?? 0;
+  const trailingCarets = trimmed.match(/\^+$/u)?.[0].length ?? 0;
+  const controlOperator = trimmed.match(/(?:&&|\|\||\|)$/u)?.[0];
+  const beforeControl = controlOperator
+    ? trimmed.slice(0, -controlOperator.length)
+    : "";
+  const controlEscapes = beforeControl.match(/(?:\\|\^)+$/u)?.[0] ?? "";
   return (
     (trimmed.endsWith("`") && backticks % 2 === 1) ||
-    /(?:\\|\^|&&|\|\||\|)\s*$/u.test(line)
+    trailingBackslashes % 2 === 1 ||
+    trailingCarets % 2 === 1 ||
+    Boolean(controlOperator && controlEscapes.length % 2 === 0)
   );
 }
 
