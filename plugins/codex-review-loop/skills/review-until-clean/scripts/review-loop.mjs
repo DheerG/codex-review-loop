@@ -2392,6 +2392,9 @@ function runCodexFeatureList(root, env, disabledFeatures = []) {
     codexProjectUntrustedOverride(root),
   ];
   for (const feature of disabledFeatures) args.push("--disable", feature);
+  for (const override of codexRuntimePathOverrides(env.CODEX_HOME)) {
+    args.push("-c", override);
+  }
   const result = run("codex", args, {
     cwd: root,
     env,
@@ -2666,6 +2669,9 @@ function runCodexManagedConfigProbe(
   ];
   for (const override of authOverrides) args.push("-c", override);
   for (const feature of disabledFeatures) args.push("--disable", feature);
+  for (const override of codexRuntimePathOverrides(temporaryHome)) {
+    args.push("-c", override);
+  }
   args.push(
     "-c",
     'web_search="disabled"',
@@ -2694,6 +2700,14 @@ function runCodexManagedConfigProbe(
     );
   }
   return readCodexCloudBundle(temporaryHome);
+}
+
+export function codexRuntimePathOverrides(temporaryHome) {
+  if (!temporaryHome) return [];
+  return [
+    `sqlite_home=${tomlInlineValue(temporaryHome)}`,
+    `log_dir=${tomlInlineValue(path.join(temporaryHome, "log"))}`,
+  ];
 }
 
 function assertCloudCodexConfigurationSafe(
@@ -2920,6 +2934,11 @@ export function codexReviewArgs(
   for (const override of reviewConfig.authOverrides ?? []) {
     args.push("-c", override);
   }
+  for (const override of codexRuntimePathOverrides(
+    reviewConfig.runtimeHome,
+  )) {
+    args.push("-c", override);
+  }
   const reviewModel = preferences.review_model ?? preferences.model;
   if (preferences.model_provider) {
     args.push(
@@ -2994,6 +3013,7 @@ function providerInvocation(state, prompt, env, repo) {
                 disabledFeatures.usesReadOnlyDefaultPermissions,
               ),
               authOverrides: disabledFeatures.authOverrides,
+              runtimeHome: temporaryHome,
             },
           ),
           input: prompt,
@@ -3745,6 +3765,16 @@ const PRODUCT_WORKFLOW_CAUSAL_PATTERNS = [
     "iu",
   ),
 ];
+const DIRECT_AI_FIX_ATTRIBUTION_PATTERNS = [
+  new RegExp(
+    String.raw`\bfix(?:es|ed|ing)?\b.{0,30}\bby\s+(?:(?:an?|the)\s+)?${AI_ATTRIBUTION_IDENTITY_SOURCE}\b`,
+    "iu",
+  ),
+  new RegExp(
+    String.raw`\b${AI_ATTRIBUTION_IDENTITY_SOURCE}\b.{0,20}\bfix(?:es|ed|ing)?\b.{0,20}\b(?:(?:this|the|a)\s+)?(?:bug|issue|code|implementation|patch|change|work)\b`,
+    "iu",
+  ),
+];
 
 const WORKFLOW_ATTRIBUTION_PATTERNS = [
   new RegExp(
@@ -3830,6 +3860,7 @@ function attributionProse(text, allowProductTerms) {
 
 function hasAttribution(text, allowProductTerms) {
   if (
+    DIRECT_AI_FIX_ATTRIBUTION_PATTERNS.some((pattern) => pattern.test(text)) ||
     PRODUCT_WORKFLOW_CAUSAL_PATTERNS.some((pattern) => pattern.test(text))
   ) {
     return true;
@@ -3991,14 +4022,14 @@ function shellExecutableName(word) {
     .toLowerCase();
 }
 
-function testSelectorOptions(command) {
+function testSelectorContext(command) {
   let invocation = shellWordAndRest(command.trimStart());
-  if (!invocation) return [];
+  if (!invocation) return null;
   let executable = shellExecutableName(invocation.word);
   let args = invocation.rest;
   if (["bunx", "npx"].includes(executable)) {
     invocation = shellWordAndRest(args.trimStart());
-    if (!invocation) return [];
+    if (!invocation) return null;
     executable = shellExecutableName(invocation.word);
     args = invocation.rest;
   } else if (
@@ -4006,42 +4037,72 @@ function testSelectorOptions(command) {
     /^(?:dlx|exec)\s+/u.test(args)
   ) {
     invocation = shellWordAndRest(args.replace(/^(?:dlx|exec)\s+/u, ""));
-    if (!invocation) return [];
+    if (!invocation) return null;
     executable = shellExecutableName(invocation.word);
     args = invocation.rest;
   }
+  const context = (options, offset = 0) => ({ offset, options });
   switch (executable) {
     case "node":
       return /(?:^|\s)--test(?:\s|$)/u.test(args)
-        ? ["--test-name-pattern"]
-        : [];
+        ? context(["--test-name-pattern"])
+        : null;
     case "jest":
     case "vitest":
-      return ["-t", "--testNamePattern", "--test-name-pattern"];
+      return context(["-t", "--testNamePattern", "--test-name-pattern"]);
     case "mocha":
     case "playwright":
-      return ["-g", "--grep"];
+      return context(["-g", "--grep"]);
     case "pytest":
-      return ["-k", "-m"];
+      return context(["-k", "-m"]);
     case "go":
-      return /^test(?:\s|$)/u.test(args) ? ["-run"] : [];
+      return /^test(?:\s|$)/u.test(args) ? context(["-run"]) : null;
     case "deno":
-      return /^test(?:\s|$)/u.test(args) ? ["--filter"] : [];
+      return /^test(?:\s|$)/u.test(args)
+        ? context(["--filter"])
+        : null;
     case "bun":
       return /^test(?:\s|$)/u.test(args)
-        ? ["-t", "--test-name-pattern"]
-        : [];
+        ? context(["-t", "--test-name-pattern"])
+        : null;
     case "dotnet":
-      return /^test(?:\s|$)/u.test(args) ? ["--filter"] : [];
+      return /^test(?:\s|$)/u.test(args)
+        ? context(["--filter"])
+        : null;
     case "gradle":
     case "gradlew":
-      return /(?:^|\s)test(?:\s|$)/u.test(args) ? ["--tests"] : [];
+      return /(?:^|\s)test(?:\s|$)/u.test(args)
+        ? context(["--tests"])
+        : null;
     case "rspec":
-      return ["-e", "--example"];
+      return context(["-e", "--example"]);
     case "swift":
-      return /^test(?:\s|$)/u.test(args) ? ["--filter"] : [];
+      return /^test(?:\s|$)/u.test(args)
+        ? context(["--filter"])
+        : null;
+    case "npm":
+    case "pnpm":
+    case "yarn": { // Product selectors begin only after script forwarding.
+      if (!/^(?:test|run\s+test)(?:\s|$)/u.test(args)) return null;
+      const forwarding = command.match(/\s--\s/u);
+      if (!forwarding) return null;
+      return context(
+        [
+          "-t",
+          "-g",
+          "-k",
+          "-m",
+          "-run",
+          "--filter",
+          "--grep",
+          "--testNamePattern",
+          "--test-name-pattern",
+        ],
+        forwarding.index + forwarding[0].length,
+      );
+    }
     default:
-      return [];
+      return null;
   }
 }
 
@@ -4062,18 +4123,21 @@ function escapeRegularExpression(text) {
 function commandAttributionProse(text, allowProductTerms) {
   if (!allowProductTerms) return text;
   const { prefix, command } = shellCommandWithPrefix(text);
-  const options = testSelectorOptions(command);
+  const selectorContext = testSelectorContext(command);
   let withoutSelectors = command;
-  if (options.length > 0) {
-    const optionSource = options.map(escapeRegularExpression).join("|");
+  if (selectorContext) {
+    const optionSource = selectorContext.options
+      .map(escapeRegularExpression)
+      .join("|");
     const selector = new RegExp(
       String.raw`(?<prefix>(?:^|\s)(?:${optionSource})(?:=|\s+))(?<value>"(?:\\.|[^"])*"|'[^']*'|\S+)`,
       "giu",
     );
-    withoutSelectors = command.replace(
+    const selectable = command.slice(selectorContext.offset).replace(
       selector,
       (...args) => `${args.at(-1).prefix}"product test selector"`,
     );
+    withoutSelectors = `${command.slice(0, selectorContext.offset)}${selectable}`;
   }
   return attributionProse(`${prefix}${withoutSelectors}`, true);
 }
@@ -4081,6 +4145,7 @@ function commandAttributionProse(text, allowProductTerms) {
 function hasNonWaivableCommandAttribution(text, allowProductTerms) {
   const prose = commandAttributionProse(text, allowProductTerms);
   return (
+    DIRECT_AI_FIX_ATTRIBUTION_PATTERNS.some((pattern) => pattern.test(prose)) ||
     PRODUCT_WORKFLOW_CAUSAL_PATTERNS.some((pattern) => pattern.test(prose)) ||
     hasExplicitAiAuthorship(prose, allowProductTerms) ||
     WORKFLOW_ATTRIBUTION_PATTERNS.some((pattern) => pattern.test(prose))
@@ -4322,7 +4387,7 @@ function longCommitProseLine(body, allowProductTerms = false) {
   );
 }
 
-const AI_AUTHORSHIP_ACTION_SOURCE = String.raw`(?:reviewed|generated|suggested|assisted|authored|co[ -]?authored|written|wrote|created|made|produced|build(?:s|ing)?|built|implement(?:s|ed|ing)?|develop(?:s|ed|ing)?|programmed|pair[ -]?programmed|help(?:ed|s|ing)?(?:\s+(?:to\s+)?author)?)`;
+const AI_AUTHORSHIP_ACTION_SOURCE = String.raw`(?:reviewed|generated|suggested|assisted|authored|co[ -]?authored|written|wrote|created|made|produced|fix(?:es|ed|ing)?|build(?:s|ing)?|built|implement(?:s|ed|ing)?|develop(?:s|ed|ing)?|programmed|pair[ -]?programmed|help(?:ed|s|ing)?(?:\s+(?:to\s+)?author)?)`;
 const DIRECT_AI_USE_AUTHORSHIP_SOURCE = String.raw`\b(?:use|uses|used|using)\s+(?:(?:an?|the)\s+)?${AI_ATTRIBUTION_IDENTITY_SOURCE}\b.{0,40}\b(?:to\s+)?${AI_AUTHORSHIP_ACTION_SOURCE}\b`;
 const AI_ATTRIBUTION_IDENTITY = new RegExp(
   String.raw`\b${AI_ATTRIBUTION_IDENTITY_SOURCE}\b`,
@@ -4439,6 +4504,9 @@ function inspectCommitMessageWithPolicy(subject, body, options) {
   }
   if (
     /\b(?:address(?:es|ed|ing)?|appl(?:y|ies|ied|ying)|fix(?:es|ed|ing)?|resolv(?:e|es|ed|ing)|handl(?:e|es|ed|ing)|incorporat(?:e|es|ed|ing)|implement(?:s|ed|ing)?|clos(?:e|es|ed|ing)|clear(?:s|ed|ing)?|tackl(?:e|es|ed|ing)|satisf(?:y|ies|ied|ying))\s+(?:the\s+)?(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?review(?:er)?\s+(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance)\b/iu.test(
+      subject,
+    ) ||
+    /\b(?:address(?:es|ed|ing)?|appl(?:y|ies|ied|ying)|fix(?:es|ed|ing)?)\s+(?:the\s+)?(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?review(?:er)?\s+(?:issues?|fixes?)\b/iu.test(
       subject,
     ) ||
     /\b(?:review(?:er)?[ -]?round|codex fixes|claude fixes|ai review)\b/iu.test(

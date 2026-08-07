@@ -36,6 +36,7 @@ import {
   codexReviewPreferencesFromConfigs,
   codexRequirementsHazardsFromToml,
   codexRequirementsPath,
+  codexRuntimePathOverrides,
   codexSelectedLegacyProfileFromConfigs,
   codexSelectedLegacyProfileFromToml,
   inspectCommitMessage,
@@ -474,6 +475,20 @@ test("Codex preserves allowlisted preferences and has no default round cap", () 
     preferences: { model: "gpt-test", model_provider: "openai" },
   });
   assert.equal(explicitProviderArgs.includes('model_provider="openai"'), true);
+  const runtimeHome = "/tmp/review-loop-codex-home";
+  const runtimeOverrides = codexRuntimePathOverrides(runtimeHome);
+  assert.deepEqual(runtimeOverrides, [
+    'sqlite_home="/tmp/review-loop-codex-home"',
+    'log_dir="/tmp/review-loop-codex-home/log"',
+  ]);
+  const runtimeArgs = codexReviewArgs(false, [], [], { runtimeHome });
+  for (const override of runtimeOverrides) {
+    const overrideIndex = runtimeArgs.indexOf(override) - 1;
+    assert.deepEqual(runtimeArgs.slice(overrideIndex, overrideIndex + 2), [
+      "-c",
+      override,
+    ]);
+  }
   const defaultArgs = codexReviewArgs();
   assert.equal(defaultArgs.includes("guardian_approval"), true);
   assert.equal(defaultArgs.includes("guardianv2"), true);
@@ -2531,6 +2546,9 @@ test("check-commit-message validates a proposed repair commit", (t) => {
   for (const productSelector of [
     '- jest -t "reject per reviewer feedback"',
     '- go test -run "reject per reviewer feedback"',
+    '- npm test -- --testNamePattern "reject per reviewer feedback"',
+    '- pnpm test -- --test-name-pattern "reject per reviewer feedback"',
+    '- yarn test -- --grep "reject per reviewer feedback"',
   ]) {
     result = invoke(
       directory,
@@ -2573,6 +2591,39 @@ test("check-commit-message validates a proposed repair commit", (t) => {
   );
   assert.equal(result.status, 2);
   assert.match(result.stdout, /review workflow|AI-workflow attribution/u);
+
+  for (const attributedSubject of [
+    "Fixed by Codex",
+    "AI fixed this bug",
+  ]) {
+    result = invoke(
+      directory,
+      env,
+      "check-commit-message",
+      "--subject",
+      attributedSubject,
+      "--body",
+      narrativeCommitBody,
+      "--product-terms",
+      "The repository implements AI attribution detection",
+    );
+    assert.equal(result.status, 2);
+    assert.match(result.stdout, /AI-workflow attribution/u);
+  }
+
+  for (const workflowSubject of ["Fix review issues", "Apply review fixes"]) {
+    result = invoke(
+      directory,
+      env,
+      "check-commit-message",
+      "--subject",
+      workflowSubject,
+      "--body",
+      narrativeCommitBody,
+    );
+    assert.equal(result.status, 2);
+    assert.match(result.stdout, /review workflow/u);
+  }
 
   result = invoke(
     directory,
