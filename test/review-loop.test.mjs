@@ -3,6 +3,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -1711,11 +1712,18 @@ test("isolated Codex feature probing skips user config without losing invocation
     );
     const sharedIdentity = path.join(sharedIdentityHome, "auth.json");
     assert.equal(readFileSync(sharedIdentity, "utf8"), "original credential");
+    const sourceDetails = lstatSync(authoritativeAuth);
+    const sharedDetails = lstatSync(sharedIdentity);
+    assert.equal(
+      sourceDetails.dev === sharedDetails.dev &&
+        sourceDetails.ino === sharedDetails.ino,
+      false,
+    );
     writeFileSync(sharedIdentity, "refreshed credential");
-    assert.equal(readFileSync(authoritativeAuth, "utf8"), "refreshed credential");
+    assert.equal(readFileSync(sharedIdentity, "utf8"), "refreshed credential");
+    assert.equal(readFileSync(authoritativeAuth, "utf8"), "original credential");
     rmSync(sharedIdentityHome, { recursive: true, force: true });
-    assert.equal(readFileSync(authoritativeAuth, "utf8"), "refreshed credential");
-    writeFileSync(authoritativeAuth, "original credential");
+    assert.equal(readFileSync(authoritativeAuth, "utf8"), "original credential");
 
     const keyringHome = path.join(storage, "keyring-codex-home");
     const keyringProbeHome = path.join(storage, "keyring-probe-home");

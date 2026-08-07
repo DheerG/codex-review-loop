@@ -8,7 +8,6 @@ import {
   constants,
   existsSync,
   fstatSync,
-  linkSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -2097,14 +2096,14 @@ export function shareCodexIdentityForProbe(state, sourceEnv, temporaryHome) {
   }
   const source = path.join(codexHome(sourceEnv), "auth.json");
   if (existsSync(source)) {
-    readBoundedCodexRuntimeFile(
+    const identity = readBoundedCodexRuntimeFile(
       source,
       MAX_CODEX_IDENTITY_BYTES,
       "Codex authentication identity",
     );
     const shared = path.join(temporaryHome, "auth.json");
     try {
-      linkSync(source, shared);
+      writeFileSync(shared, identity, { flag: "wx", mode: 0o600 });
       const sourceDetails = lstatSync(source);
       const sharedDetails = lstatSync(shared);
       if (
@@ -2112,14 +2111,14 @@ export function shareCodexIdentityForProbe(state, sourceEnv, temporaryHome) {
         sourceDetails.isSymbolicLink() ||
         !sharedDetails.isFile() ||
         sharedDetails.isSymbolicLink() ||
-        sourceDetails.dev !== sharedDetails.dev ||
-        sourceDetails.ino !== sharedDetails.ino
+        (sourceDetails.dev === sharedDetails.dev &&
+          sourceDetails.ino === sharedDetails.ino)
       ) {
-        throw new Error("the shared identity is not the authoritative file");
+        throw new Error("the isolated identity is not an independent file");
       }
     } catch (error) {
       throw new CliError(
-        `Cannot safely share file-backed Codex authentication with the isolated reviewer: ${error.message}. Configure keyring authentication or keep the repository and Codex home on the same filesystem.`,
+        `Cannot safely copy file-backed Codex authentication into the isolated reviewer home: ${error.message}.`,
         3,
       );
     }
