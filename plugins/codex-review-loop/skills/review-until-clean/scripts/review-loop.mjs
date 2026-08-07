@@ -1233,6 +1233,9 @@ export function codexReviewPreferencesFromToml(
         3,
       );
     }
+    if (modelProvider === "openai") {
+      preferences.model_provider = modelProvider;
+    }
   }
   return preferences;
 }
@@ -1787,9 +1790,9 @@ export function codexAuthOverridesFromToml(
       mode = tomlStringValue(record.value ?? "", source);
     }
   }
-  if (mode === undefined || mode === "auto" || mode === "file") return [];
-  if (mode === "keyring") {
-    return ['cli_auth_credentials_store="keyring"'];
+  if (mode === undefined) return [];
+  if (["auto", "file", "keyring"].includes(mode)) {
+    return [`cli_auth_credentials_store=${tomlInlineValue(mode)}`];
   }
   throw new CliError(
     `Cannot preserve unsupported Codex authentication storage mode ${JSON.stringify(mode)}.`,
@@ -2401,6 +2404,12 @@ export function codexReviewArgs(
     args.push("-c", override);
   }
   const reviewModel = preferences.review_model ?? preferences.model;
+  if (preferences.model_provider) {
+    args.push(
+      "-c",
+      `model_provider=${tomlInlineValue(preferences.model_provider)}`,
+    );
+  }
   if (reviewModel) args.push("--model", reviewModel);
   if (preferences.model_reasoning_effort) {
     args.push(
@@ -3293,7 +3302,11 @@ function verificationEvidenceLines(body, anySection = false) {
     if (isVerbatimVerificationCommand(line)) {
       evidence.add(index);
       commandContinues = hasShellContinuationMarker(line);
-    } else if (commandContinues && /^\s+\S/u.test(line)) {
+    } else if (
+      commandContinues &&
+      /^\s+\S/u.test(line) &&
+      isVerbatimVerificationContinuation(line)
+    ) {
       evidence.add(index);
       commandContinues = hasShellContinuationMarker(line);
     } else {
@@ -3321,6 +3334,18 @@ function hasShellContinuationMarker(line) {
   );
 }
 
+function isVerbatimVerificationContinuation(line) {
+  const trimmed = line.trim();
+  return (
+    !hasWorkflowAttribution(trimmed) &&
+    (
+      isCommandShapedVerification(trimmed) ||
+      /^--?[A-Za-z0-9][A-Za-z0-9_-]*(?:=|\s|$)/u.test(trimmed) ||
+      /^(?:["'`]|\$\{)/u.test(trimmed)
+    )
+  );
+}
+
 function commitProseBody(body, anySection = false) {
   const evidence = verificationEvidenceLines(body, anySection);
   return body
@@ -3341,6 +3366,10 @@ const AI_ATTRIBUTION_IDENTITY_SOURCE = String.raw`(?:ai|artificial intelligence|
 const AI_AUTHORSHIP_ACTION_SOURCE = String.raw`(?:reviewed|generated|suggested|assisted|authored|co[ -]?authored|written|created|made|produced|programmed|pair[ -]?programmed|help(?:ed|s|ing)?(?:\s+(?:to\s+)?author)?)`;
 const AI_ATTRIBUTION_IDENTITY = new RegExp(
   String.raw`\b${AI_ATTRIBUTION_IDENTITY_SOURCE}\b`,
+  "iu",
+);
+const AI_ATTRIBUTION_TRAILER_IDENTITY = new RegExp(
+  String.raw`^(?:(?:automated|generative)\s+)?${AI_ATTRIBUTION_IDENTITY_SOURCE}(?:\s+(?:assistant|agent|bot|reviewer|tool|cli|code|codex))?$`,
   "iu",
 );
 const EXPLICIT_AI_AUTHORSHIP_PATTERNS = [
@@ -3384,7 +3413,7 @@ function hasAiAttributionTrailer(message) {
     const displayIdentity = trailer.groups.identity
       .replace(/<[^<>]*>\s*$/u, "")
       .trim();
-    return AI_ATTRIBUTION_IDENTITY.test(displayIdentity);
+    return AI_ATTRIBUTION_TRAILER_IDENTITY.test(displayIdentity);
   });
 }
 

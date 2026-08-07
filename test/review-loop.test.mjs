@@ -417,6 +417,11 @@ test("Codex preserves allowlisted preferences and has no default round cap", () 
     isolatedArgs.includes('cli_auth_credentials_store="keyring"'),
     true,
   );
+  const explicitProviderArgs = codexReviewArgs(false, [], [], {
+    root: "/tmp/project",
+    preferences: { model: "gpt-test", model_provider: "openai" },
+  });
+  assert.equal(explicitProviderArgs.includes('model_provider="openai"'), true);
   const defaultArgs = codexReviewArgs();
   assert.equal(defaultArgs.includes("guardian_approval"), true);
   assert.equal(defaultArgs.includes("guardianv2"), true);
@@ -647,6 +652,12 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
   );
   assert.deepEqual(
     codexReviewPreferencesFromToml(
+      'model = "gpt-base"\nmodel_provider = "openai"',
+    ),
+    { model: "gpt-base", model_provider: "openai" },
+  );
+  assert.deepEqual(
+    codexReviewPreferencesFromToml(
       'profile = "work"\n[profiles.work]\nmodel = "gpt-profile"\nmodel_reasoning_effort = "xhigh"',
       "legacy user config",
       { legacyProfiles: true },
@@ -682,7 +693,11 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
   );
   assert.deepEqual(
     codexAuthOverridesFromToml('cli_auth_credentials_store = "file"'),
-    [],
+    ['cli_auth_credentials_store="file"'],
+  );
+  assert.deepEqual(
+    codexAuthOverridesFromToml('cli_auth_credentials_store = "auto"'),
+    ['cli_auth_credentials_store="auto"'],
   );
   assert.throws(
     () =>
@@ -1669,6 +1684,20 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     env,
     "check-commit-message",
     "--subject",
+    "Keep continued prose visible",
+    "--body",
+    `${narrativeCommitBody}\n- npm test &&\n  Reviewed by Codex`,
+    "--product-terms",
+    "The repository implements reviewer-provider behavior",
+  );
+  assert.equal(result.status, 2);
+  assert.match(result.stdout, /AI-workflow attribution/u);
+
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
     "Keep prose after escaped command markers visible",
     "--body",
     `${narrativeCommitBody}\n${"- npm test " + "\\\\"}\n  Reviewed by Codex`,
@@ -1914,6 +1943,17 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "all",
     "--product-terms",
     "The repository implements an OpenAI response provider",
+  );
+  assert.equal(result.status, 0, result.stdout);
+
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
+    "Preserve contributor certification",
+    "--body",
+    `${narrativeCommitBody}\n\nSigned-off-by: Claude Shannon <claude@example.com>`,
   );
   assert.equal(result.status, 0, result.stdout);
 
