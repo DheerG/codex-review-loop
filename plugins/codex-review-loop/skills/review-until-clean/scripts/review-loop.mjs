@@ -1285,6 +1285,7 @@ export function codexPromptHazardsFromToml(
   );
   const hazards = new Set();
   const promptKeys = new Set([
+    "allow_login_shell",
     "compact_prompt",
     "developer_instructions",
     "experimental_compact_prompt_file",
@@ -1296,6 +1297,11 @@ export function codexPromptHazardsFromToml(
     "project_doc_fallback_filenames",
     "project_doc_max_bytes",
     "project_root_markers",
+    "tool_suggest",
+  ]);
+  const promptRoots = new Set([
+    "shell_environment_policy",
+    "skills",
   ]);
   for (const record of effectiveCodexRecords(
     records,
@@ -1304,6 +1310,8 @@ export function codexPromptHazardsFromToml(
   )) {
     const { parts } = record;
     if (parts.length === 1 && promptKeys.has(parts[0])) {
+      hazards.add(parts[0]);
+    } else if (promptRoots.has(parts[0])) {
       hazards.add(parts[0]);
     } else if (parts[0] === "auto_review" && parts[1] === "policy") {
       hazards.add("auto_review.policy");
@@ -1499,6 +1507,8 @@ export function codexRequirementsHazardsFromToml(
       }
     } else if (key === "remote_sandbox_config") {
       hazards.add("remote_sandbox_config");
+    } else if (key === "rules") {
+      hazards.add("rules");
     } else if (
       record.parts.length === 3 &&
       key === "permissions" &&

@@ -828,6 +828,17 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
     ],
   );
   assert.deepEqual(
+    codexPromptHazardsFromToml(
+      'skills = []\ntool_suggest = {}\nallow_login_shell = true\n[shell_environment_policy]\ninherit = "all"',
+    ),
+    [
+      "allow_login_shell",
+      "shell_environment_policy",
+      "skills",
+      "tool_suggest",
+    ],
+  );
+  assert.deepEqual(
     codexRequirementsHazardsFromToml(`
 allowed_approval_policies = ["on-request", "never"]
 allowed_approvals_reviewers = ["user"]
@@ -843,6 +854,12 @@ default_permissions = ":read-only"
       'allowed_approval_policies = ["on-request"]',
     ),
     ["allowed_approval_policies"],
+  );
+  assert.deepEqual(
+    codexRequirementsHazardsFromToml(
+      'rules = [{ command = "git diff", decision = "forbid" }]',
+    ),
+    ["rules"],
   );
   assert.deepEqual(
     codexRequirementsHazardsFromToml(
