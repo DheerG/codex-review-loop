@@ -1336,6 +1336,52 @@ obsolete_external_tool             removed            true
     { model: "gpt-profile" },
   );
 
+  const oversizedProfileMcpConfig = Array.from(
+    { length: 400 },
+    (_, index) =>
+      `[profiles.work.mcp_servers.server_${index}_${"x".repeat(24)}]\ncommand = "reader"`,
+  ).join("\n");
+  assert.throws(
+    () =>
+      codexFeaturesForReview(
+        {
+          root: "/tmp/repository",
+          isolateCodexConfig: true,
+          codexLegacyProfiles: true,
+        },
+        {},
+        undefined,
+        (_root, _env, requested = []) =>
+          new Map([
+            ["hooks", !requested.includes("hooks")],
+            ["shell_tool", true],
+          ]),
+        () => ({
+          managedConfigs: [
+            {
+              contents: 'profile = "work"',
+              file: "cloud-managed Codex config (profile selection)",
+            },
+          ],
+          requirementsConfigs: [],
+        }),
+        {
+          localConfigInventory: {
+            ordinaryConfigs: [
+              {
+                contents: oversizedProfileMcpConfig,
+                file: "system config",
+              },
+            ],
+            managedConfigs: [],
+            requirementsConfigs: [],
+          },
+          mcpServers: [],
+        },
+      ),
+    /MCP inventory is too large to disable safely/u,
+  );
+
   const cloudSelectedPermissionFeatures = codexFeaturesForReview(
     {
       root: "/tmp/repository",

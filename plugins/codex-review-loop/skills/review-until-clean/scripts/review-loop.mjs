@@ -2418,11 +2418,13 @@ function assertCloudCodexConfigurationSafe(
   ]) {
     assertCodexRequirementsSafe(config.contents, config.file);
   }
+  const mergedMcpServers = [...mcpNames].sort();
+  codexMcpDisableOverrides(mergedMcpServers);
   if (reviewOptions.mcpServers) {
     reviewOptions.mcpServers.splice(
       0,
       reviewOptions.mcpServers.length,
-      ...[...mcpNames].sort(),
+      ...mergedMcpServers,
     );
   }
   const usesReadOnlyDefaultPermissions = [
