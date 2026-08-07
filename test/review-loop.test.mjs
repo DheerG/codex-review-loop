@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { once } from "node:events";
 import {
   existsSync,
   mkdirSync,
@@ -12,6 +13,7 @@ import {
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 
 import {
   codexApprovalHazardsFromToml,
@@ -300,12 +302,25 @@ ${formattedVerdict}`,
       JSON.stringify({
         findings: [],
         overall_correctness: "patch is correct",
-        overall_explanation: "No defects remain in the retry path.",
+        overall_explanation: "No defects remain.",
         overall_confidence_score: 0.99,
       }),
       "codex",
     ).status,
     "clean",
+  );
+  assert.equal(
+    parseReview(
+      JSON.stringify({
+        findings: [],
+        overall_correctness: "patch is correct",
+        overall_explanation:
+          "The changed retry path crashes whenever input is empty.",
+        overall_confidence_score: 0.99,
+      }),
+      "codex",
+    ).status,
+    "invalid",
   );
   assert.equal(
     parseReview(
@@ -1312,9 +1327,86 @@ test("isolated Codex feature probing skips user config without losing invocation
     assert.equal(existsSync(probeHome), false);
     assert.equal(existsSync(staleHome), false);
     assert.equal(existsSync(liveHome), true);
+
+    const signalListeners = {
+      SIGINT: process.listenerCount("SIGINT"),
+      SIGTERM: process.listenerCount("SIGTERM"),
+    };
+    let retainedFeatures;
+    try {
+      retainedFeatures = codexFeaturesForReview(
+        { root: "/tmp/repository", isolateCodexConfig: true },
+        env,
+        storage,
+        (_root, _probeEnv, requested = []) =>
+          new Map([
+            ["codex_hooks", !requested.includes("codex_hooks")],
+            ["shell_tool", true],
+          ]),
+        () => ({ managedConfigs: [], requirementsConfigs: [] }),
+        { retainHome: true },
+      );
+      assert.equal(existsSync(retainedFeatures.codexHome), true);
+      assert.equal(
+        process.listenerCount("SIGINT"),
+        signalListeners.SIGINT + 1,
+      );
+      assert.equal(
+        process.listenerCount("SIGTERM"),
+        signalListeners.SIGTERM + 1,
+      );
+    } finally {
+      retainedFeatures?.cleanupCodexHome();
+    }
+    assert.equal(existsSync(retainedFeatures.codexHome), false);
+    assert.equal(process.listenerCount("SIGINT"), signalListeners.SIGINT);
+    assert.equal(process.listenerCount("SIGTERM"), signalListeners.SIGTERM);
   } finally {
     rmSync(storage, { recursive: true, force: true });
   }
+});
+
+test("retained Codex homes are deleted when the host is interrupted", async (t) => {
+  const storage = mkdtempSync(path.join(os.tmpdir(), "review-loop-signal-state-"));
+  const fixture = path.join(storage, "retain-home.mjs");
+  t.after(() => rmSync(storage, { recursive: true, force: true }));
+  writeFileSync(
+    fixture,
+    `import { codexFeaturesForReview } from ${JSON.stringify(pathToFileURL(cli).href)};
+const retained = codexFeaturesForReview(
+  { root: "/tmp/repository", isolateCodexConfig: true },
+  {},
+  ${JSON.stringify(storage)},
+  (_root, _env, requested = []) => new Map([
+    ["codex_hooks", !requested.includes("codex_hooks")],
+    ["shell_tool", true],
+  ]),
+  () => ({ managedConfigs: [], requirementsConfigs: [] }),
+  { retainHome: true },
+);
+process.stdout.write(retained.codexHome + "\\n");
+process.stdin.resume();
+`,
+  );
+  const child = spawn(process.execPath, [fixture], {
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let stdout = "";
+  const temporaryHome = await new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString("utf8");
+      const line = stdout.match(/^(.+)\r?\n/u)?.[1];
+      if (line) resolve(line);
+    });
+  });
+  assert.equal(existsSync(temporaryHome), true);
+  const exit = once(child, "exit");
+  child.kill("SIGTERM");
+  const [code, signal] = await exit;
+  assert.equal(code, null);
+  assert.equal(signal, "SIGTERM");
+  assert.equal(existsSync(temporaryHome), false);
 });
 
 test("doctor reports Codex availability from the target safety preflight", (t) => {

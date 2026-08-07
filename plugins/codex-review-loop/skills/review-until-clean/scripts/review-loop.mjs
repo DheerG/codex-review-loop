@@ -1997,6 +1997,36 @@ function removeStaleCodexHomes(parent) {
   }
 }
 
+function retainedCodexHomeCleanup(temporaryHome) {
+  let cleaned = false;
+  const handlers = new Map();
+  const removeHandlers = () => {
+    for (const [signal, handler] of handlers) {
+      process.removeListener(signal, handler);
+    }
+  };
+  const cleanup = () => {
+    if (cleaned) return;
+    removeHandlers();
+    rmSync(temporaryHome, { recursive: true, force: true });
+    cleaned = true;
+  };
+  for (const signal of ["SIGINT", "SIGTERM"]) {
+    const handler = () => {
+      try {
+        cleanup();
+      } finally {
+        if (process.listenerCount(signal) === 0) {
+          process.kill(process.pid, signal);
+        }
+      }
+    };
+    handlers.set(signal, handler);
+    process.once(signal, handler);
+  }
+  return cleanup;
+}
+
 function cloudFragments(bundle, key, label) {
   const fragments = bundle?.[key]?.enterprise_managed;
   if (fragments === undefined || fragments === null) return [];
@@ -2285,12 +2315,14 @@ export function codexFeaturesForReview(
 ) {
   let temporaryHome;
   let retained = false;
+  let cleanupCodexHome;
   const parent = storage ?? os.tmpdir();
   mkdirSync(parent, { recursive: true });
   removeStaleCodexHomes(parent);
   temporaryHome = mkdtempSync(
     path.join(parent, `${CODEX_TEMP_HOME_PREFIX}${process.pid}-`),
   );
+  cleanupCodexHome = retainedCodexHomeCleanup(temporaryHome);
   const probeEnv = { ...env, CODEX_HOME: temporaryHome };
   try {
     const supported = inventory(state.root, probeEnv);
@@ -2328,6 +2360,7 @@ export function codexFeaturesForReview(
     retained = Boolean(options.retainHome);
     return withCodexIsolationMetadata(disabled, {
       codexHome: retained ? temporaryHome : null,
+      cleanupCodexHome: retained ? cleanupCodexHome : null,
       selectedLegacyProfile: configuration.selectedLegacyProfile,
       selectedLegacyPreferenceProfile:
         configuration.selectedLegacyPreferenceProfile,
@@ -2337,7 +2370,7 @@ export function codexFeaturesForReview(
     });
   } finally {
     if (temporaryHome && !retained) {
-      rmSync(temporaryHome, { recursive: true, force: true });
+      cleanupCodexHome();
     }
   }
 }
@@ -2408,6 +2441,7 @@ function providerInvocation(state, prompt, env, repo) {
         },
       );
       const temporaryHome = disabledFeatures.codexHome;
+      const cleanupCodexHome = disabledFeatures.cleanupCodexHome;
       try {
         const preferences = codexReviewPreferencesForReview(
           state,
@@ -2437,11 +2471,10 @@ function providerInvocation(state, prompt, env, repo) {
           ),
           input: prompt,
           env: { ...env, CODEX_HOME: temporaryHome },
-          cleanup: () =>
-            rmSync(temporaryHome, { recursive: true, force: true }),
+          cleanup: cleanupCodexHome,
         };
       } catch (error) {
-        rmSync(temporaryHome, { recursive: true, force: true });
+        cleanupCodexHome();
         throw error;
       }
     }
@@ -2580,9 +2613,9 @@ function providerErrorKind(result) {
 
 function codexExplicitClean(text) {
   const patterns = [
-    /^no\s+(?:(?:in-scope\s+functional|actionable)\s+)?(?:findings?|defects?|issues?|bugs?)(?:\s+(?:(?:were\s+)?(?:found|identified|detected)|remains?))?[.!]?$/iu,
-    /^(?:i\s+)?(?:found|identified|detected)\s+no\s+(?:(?:in-scope\s+functional|actionable)\s+)?(?:findings?|defects?|issues?|bugs?)[.!]?$/iu,
-    /^(?:i\s+)?(?:did\s+not|didn't)\s+(?:find|identify|detect)\s+(?:any\s+)?(?:(?:in-scope\s+functional|actionable)\s+)?(?:findings?|defects?|issues?|bugs?)[.!]?$/iu,
+    /^no\s+(?:(?:in-scope\s+functional|actionable|unresolved)\s+)?(?:findings?|defects?|issues?|bugs?)(?:\s+(?:(?:were\s+)?(?:found|identified|detected)|remains?))?[.!]?$/iu,
+    /^(?:i\s+)?(?:found|identified|detected)\s+no\s+(?:(?:in-scope\s+functional|actionable|unresolved)\s+)?(?:findings?|defects?|issues?|bugs?)[.!]?$/iu,
+    /^(?:i\s+)?(?:did\s+not|didn't)\s+(?:find|identify|detect)\s+(?:any\s+)?(?:(?:in-scope\s+functional|actionable|unresolved)\s+)?(?:findings?|defects?|issues?|bugs?)[.!]?$/iu,
   ];
   const lines = text
     .split(/\r?\n/u)
@@ -2688,7 +2721,7 @@ function parseCodexStructuredReview(text) {
   if (
     findings.length === 0 &&
     value.overall_correctness === "patch is correct" &&
-    !codexExplanationClaimsFinding(value.overall_explanation)
+    codexExplicitClean(normalizeCodexCleanLine(value.overall_explanation))
   ) {
     return { status: "clean", findings: [] };
   }
@@ -2704,24 +2737,6 @@ function parseCodexStructuredReview(text) {
     findings,
     reason: "Codex structured findings contradict the overall correctness verdict.",
   };
-}
-
-function codexExplanationClaimsFinding(explanation) {
-  const prose = explanation
-    .replace(
-      /\b(?:no|without(?:\s+any)?|free\s+(?:of|from))\s+(?:(?:in-scope|actionable|material|remaining|unresolved)\s+)*(?:findings?|defects?|issues?|bugs?|problems?|regressions?|vulnerabilities|errors?)\b/giu,
-      "",
-    )
-    .replace(
-      /\b(?:findings?|defects?|issues?|bugs?|problems?|regressions?|vulnerabilities|errors?)\s+(?:do|does|did)\s+not\s+(?:remain|exist|persist)\b/giu,
-      "",
-    );
-  return [
-    /\b(?:findings?|defects?|issues?|bugs?|problems?|regressions?|vulnerabilities|errors?)\s+(?:still\s+)?(?:remains?|exists?|persists?|(?:was|were)\s+(?:found|identified)|(?:is|are)\s+present)\b/iu,
-    /\b(?:remaining|unresolved|actionable)\s+(?:finding|defect|issue|bug|problem|regression|vulnerability|error)s?\b/iu,
-    /\bthere\s+(?:is|are)\s+(?:(?:an?|one|two|three|\d+)\s+)?(?:(?:actionable|material)\s+)?(?:finding|defect|issue|bug|problem|regression|vulnerability|error)s?\b/iu,
-    /\b(?:patch|change|implementation|behavior|behaviour|path)\b.{0,40}\b(?:is|are|remains?|appears?|seems?)\s+(?:broken|incorrect|unsafe|faulty|defective)\b/iu,
-  ].some((pattern) => pattern.test(prose));
 }
 
 export function parseReview(output, provider = "custom") {
