@@ -2282,7 +2282,12 @@ test("check-commit-message validates a proposed repair commit", (t) => {
   assert.equal(clean.policy.mode, "default");
   assert.match(clean.historyPolicy, /existing commits are never inspected/u);
 
-  for (const unknownHeading of ["Notes:", "Tests (CI):", "### Notes"]) {
+  for (const unknownHeading of [
+    "Notes:",
+    "Tests (CI):",
+    "2. Notes:",
+    "### Notes",
+  ]) {
     result = invoke(
       directory,
       env,

@@ -3793,7 +3793,7 @@ function verificationEvidenceLines(
       continue;
     }
     if (
-      /^(?:#{1,6}\s+\S.*|[A-Za-z][^:\r\n]{0,80}:)\s*$/u.test(
+      /^(?:#{1,6}\s+\S.*|(?:\d+[.)]\s+)?[A-Za-z][^:\r\n]{0,80}:)\s*$/u.test(
         line.trim(),
       )
     ) {
