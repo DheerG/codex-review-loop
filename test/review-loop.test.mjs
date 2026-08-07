@@ -1018,6 +1018,18 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     assert.equal(result.status, 0, `${command}\n${result.stdout}`);
   }
 
+  const environmentCommand = `NODE_OPTIONS="--conditions=test" node --test --test-name-pattern="${"environment-prefixed evidence ".repeat(5).trim()}"`;
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
+    "Preserve environment-prefixed verification evidence",
+    "--body",
+    `${narrativeCommitBody}\n- ${environmentCommand}`,
+  );
+  assert.equal(result.status, 0, result.stderr);
+
   for (const command of [
     String.raw`C:\tools\runner.exe --test ^`,
     "powershell -File verify.ps1 `",
@@ -1033,6 +1045,20 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     );
     assert.equal(result.status, 0, `${command}\n${result.stdout}`);
   }
+
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
+    "Keep prose after Markdown command spans visible",
+    "--body",
+    `${narrativeCommitBody}\n- \`npm test\`\n  Reviewed by Codex`,
+    "--product-terms",
+    "The repository implements reviewer-provider behavior",
+  );
+  assert.equal(result.status, 2);
+  assert.match(result.stdout, /AI-workflow attribution/u);
 
   result = invoke(
     directory,

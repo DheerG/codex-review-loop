@@ -2362,16 +2362,28 @@ function startsWithCommandPath(text) {
   return Boolean(quoted && hasCommandPathPrefix(quoted[2]));
 }
 
+function withoutLeadingEnvironmentAssignments(text) {
+  return text.replace(
+    /^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"(?:\\.|[^"])*"|'[^']*'|\S+)\s+)+/u,
+    "",
+  );
+}
+
 function isCommandShapedVerification(text) {
   if (/^\$\s+\S/u.test(text) || /^`[^`]+`$/u.test(text)) return true;
   if (startsWithWorkflowAttribution(text)) return false;
-  const pathCommand = startsWithCommandPath(text);
-  const executable = text.match(/^([a-z0-9][A-Za-z0-9_.@+/-]*)(?:\s|$)/u)?.[1];
+  const command = withoutLeadingEnvironmentAssignments(text);
+  const hasEnvironment = command !== text;
+  const pathCommand = startsWithCommandPath(command);
+  const executable = command.match(
+    /^([a-z0-9][A-Za-z0-9_.@+/-]*)(?:\s|$)/u,
+  )?.[1];
   if (!pathCommand && !executable) return false;
   const commonCommand = /^(?:ava|bash|biome|bun|bundle|cargo|claude|cmake|codex|composer|ctest|deno|dotnet|eslint|gemini|gh|git|go|gradle|jest|make|mix|mocha|mvn|node|npm|npx|opencode|php|pip|pip3|pnpm|powershell|prettier|pytest|python|python3|rake|rebar3|ruby|rustc|sh|swift|tsc|uv|vitest|xcodebuild|yarn|zsh)$/u.test(
     executable ?? "",
   );
-  const explicitSyntax = pathCommand || hasUnambiguousShellSyntax(text);
+  const explicitSyntax =
+    hasEnvironment || pathCommand || hasUnambiguousShellSyntax(text);
   if (!commonCommand && !explicitSyntax) return false;
   const attributionLike = hasWorkflowAttribution(text);
   return !attributionLike || explicitSyntax;
@@ -2417,7 +2429,12 @@ function verificationEvidenceLines(body, anySection = false) {
 }
 
 function hasShellContinuationMarker(line) {
-  return /(?:\\|`|\^|&&|\|\||\|)\s*$/u.test(line);
+  const trimmed = line.trimEnd();
+  const backticks = trimmed.match(/`/gu)?.length ?? 0;
+  return (
+    (trimmed.endsWith("`") && backticks % 2 === 1) ||
+    /(?:\\|\^|&&|\|\||\|)\s*$/u.test(line)
+  );
 }
 
 function commitProseBody(body, anySection = false) {
