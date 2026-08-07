@@ -1066,6 +1066,7 @@ export function codexReviewPreferencesFromToml(
   const preferences = {};
   let modelProvider;
   let modelCatalog = false;
+  const configuredModelProviders = new Set();
   for (const record of effectiveCodexRecords(
     records,
     options,
@@ -1081,11 +1082,16 @@ export function codexReviewPreferencesFromToml(
       modelProvider = tomlStringValue(record.value ?? "", source);
     } else if (parts.length === 1 && parts[0] === "model_catalog_json") {
       modelCatalog = true;
+    } else if (parts[0] === "model_providers" && parts[1]) {
+      configuredModelProviders.add(parts[1]);
     }
   }
   if (preferences.model || preferences.review_model) {
     const dependencies = [];
-    if (modelProvider && modelProvider !== "openai") {
+    const effectiveModelProvider = modelProvider ?? "openai";
+    if (configuredModelProviders.has(effectiveModelProvider)) {
+      dependencies.push(`model_providers.${effectiveModelProvider}`);
+    } else if (modelProvider && modelProvider !== "openai") {
       dependencies.push(`model_provider=${JSON.stringify(modelProvider)}`);
     }
     if (modelCatalog) dependencies.push("model_catalog_json");
@@ -2285,8 +2291,8 @@ const PRODUCT_TERM_PATTERNS = [
 ];
 
 const WORKFLOW_ATTRIBUTION_PATTERNS = [
-  /\b(?:reviewed|generated|suggested|assisted|authored|written|created|made|produced)\s+(?:by|with)\s+(?:(?:an?|the)\s+)?(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode|ai|llm|reviewer)\b/iu,
-  /\b(?:(?:an?|the)\s+)?(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode|ai|llm|reviewer)[\s-]+(?:reviewed|generated|suggested|assisted|authored|written|created|made|produced)\b/iu,
+  /\b(?:reviewed|generated|suggested|assisted|authored|co[ -]?authored|written|created|made|produced)\s+(?:by|with)\s+(?:(?:an?|the)\s+)?(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode|ai|llm|reviewer)\b/iu,
+  /\b(?:(?:an?|the)\s+)?(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode|ai|llm|reviewer)[\s-]+(?:reviewed|generated|suggested|assisted|authored|co[ -]?authored|written|created|made|produced)\b/iu,
   /\b(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance)\s+(?:from|by)\s+(?:(?:an?|the)\s+)?(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode|ai|llm|reviewer)\b/iu,
   /\b(?:found|identified|reported|flagged|raised|caught|suggested|requested|required)\s+(?:by|during|in|from|through)\s+(?:(?:the|a)\s+)?(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?(?:review|reviewer|feedback|findings?|comments?)|(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu,
   /\b(?:based\s+on|because\s+of|prompted\s+by|in\s+response\s+to)\s+(?:(?:the|a)\s+)?(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?(?:review|reviewer|feedback|findings?|comments?)|(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu,
@@ -2356,10 +2362,22 @@ function startsWithWorkflowAttribution(text) {
   );
 }
 
+function hasCommandPathPrefix(text) {
+  return /^(?:\/|\.{1,2}\/|~\/|[A-Za-z]:[\\/]|\\\\|\.{1,2}\\)/u.test(
+    text,
+  );
+}
+
+function startsWithCommandPath(text) {
+  if (hasCommandPathPrefix(text) && /^\S+/u.test(text)) return true;
+  const quoted = text.match(/^(?:&\s*)?(["'])(.+?)\1(?:\s|$)/u);
+  return Boolean(quoted && hasCommandPathPrefix(quoted[2]));
+}
+
 function isCommandShapedVerification(text) {
   if (/^\$\s+\S/u.test(text) || /^`[^`]+`$/u.test(text)) return true;
   if (startsWithWorkflowAttribution(text)) return false;
-  const pathCommand = /^(?:\/|\.\/|\.\.\/|~\/)\S+/u.test(text);
+  const pathCommand = startsWithCommandPath(text);
   const executable = text.match(/^([a-z0-9][A-Za-z0-9_.@+/-]*)(?:\s|$)/u)?.[1];
   if (!pathCommand && !executable) return false;
   const commonCommand = /^(?:ava|bash|biome|bun|bundle|cargo|claude|cmake|codex|composer|ctest|deno|dotnet|eslint|gemini|gh|git|go|gradle|jest|make|mix|mocha|mvn|node|npm|npx|opencode|php|pip|pip3|pnpm|powershell|prettier|pytest|python|python3|rake|rebar3|ruby|rustc|sh|swift|tsc|uv|vitest|xcodebuild|yarn|zsh)$/u.test(
@@ -2375,7 +2393,7 @@ function hasUnambiguousShellSyntax(text) {
   return (
     /^\$\s+\S/u.test(text) ||
     /^`[^`]+`$/u.test(text) ||
-    /^(?:\/|\.\/|\.\.\/|~\/)/u.test(text) ||
+    startsWithCommandPath(text) ||
     /(?:^|\s)(?:--?[A-Za-z0-9]|[A-Za-z_][A-Za-z0-9_]*=)/u.test(text) ||
     /(?:^|\s)(?:&&|\|\||[|;<>])(?:\s|$)/u.test(text) ||
     /\\\s*$/u.test(text)
@@ -2411,7 +2429,7 @@ function verificationEvidenceLines(body, anySection = false) {
 }
 
 function hasShellContinuationMarker(line) {
-  return /(?:\\|&&|\|\||\|)\s*$/u.test(line);
+  return /(?:\\|`|\^|&&|\|\||\|)\s*$/u.test(line);
 }
 
 function commitProseBody(body, anySection = false) {
@@ -2468,7 +2486,7 @@ function inspectCommitMessageWithPolicy(subject, body, options) {
     );
   }
   if (
-    /^(?:[-*]\s+)?[A-Za-z0-9][A-Za-z0-9-]*-(?:by|with):.*\b(?:codex|claude|gemini|chatgpt|gpt(?:-\d+(?:\.\d+)*)?|openai|anthropic|opencode|ai|llm|reviewer)\b/imu.test(
+    /^[\t ]*(?:[-*]\s+)?[A-Za-z0-9][A-Za-z0-9-]*-(?:by|with):.*\b(?:codex|claude|gemini|chatgpt|gpt(?:-\d+(?:\.\d+)*)?|openai|anthropic|opencode|ai|llm|reviewer)\b/imu.test(
       `${subject}\n${body}`,
     )
   ) {

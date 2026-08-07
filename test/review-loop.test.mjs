@@ -520,6 +520,13 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
   assert.throws(
     () =>
       codexReviewPreferencesFromToml(
+        'model = "private-review"\nmodel_provider = "openai"\n[model_providers.openai]\nbase_url = "https://models.example.test"',
+      ),
+    /dependent user configuration.*model_providers\.openai/u,
+  );
+  assert.throws(
+    () =>
+      codexReviewPreferencesFromToml(
         'review_model = "catalog-review"\nmodel_catalog_json = "/models.json"',
       ),
     /dependent user configuration.*model_catalog_json/u,
@@ -988,6 +995,40 @@ test("check-commit-message validates a proposed repair commit", (t) => {
   );
   assert.equal(result.status, 0, result.stderr);
 
+  const windowsVerificationCommands = [
+    String.raw`C:\tools\runner.exe --test "${"native windows evidence ".repeat(6).trim()}"`,
+    String.raw`\\server\share\runner.exe --test "${"unc verification evidence ".repeat(6).trim()}"`,
+    String.raw`"C:\Program Files\runner.exe" --test "${"quoted executable evidence ".repeat(6).trim()}"`,
+  ];
+  for (const command of windowsVerificationCommands) {
+    result = invoke(
+      directory,
+      env,
+      "check-commit-message",
+      "--subject",
+      "Preserve native Windows verification evidence",
+      "--body",
+      `${narrativeCommitBody}\n- ${command}`,
+    );
+    assert.equal(result.status, 0, `${command}\n${result.stdout}`);
+  }
+
+  for (const command of [
+    String.raw`C:\tools\runner.exe --test ^`,
+    "powershell -File verify.ps1 `",
+  ]) {
+    result = invoke(
+      directory,
+      env,
+      "check-commit-message",
+      "--subject",
+      "Preserve native Windows command continuations",
+      "--body",
+      `${narrativeCommitBody}\n- ${command}\n${longContinuation}`,
+    );
+    assert.equal(result.status, 0, `${command}\n${result.stdout}`);
+  }
+
   result = invoke(
     directory,
     env,
@@ -1091,6 +1132,8 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "Reviewer feedback was incorporated.",
     "Changes generated with AI.",
     "Changes authored by the reviewer.",
+    "AI co-authored the change.",
+    "Claude co-authored the change.",
   ]) {
     result = invoke(
       directory,
@@ -1150,6 +1193,7 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "Pair-programmed-with: Claude",
     "Co-authored-by: GPT-5",
     "Reviewed-by: reviewer",
+    "  Co-authored-by: Codex",
   ]) {
     result = invoke(
       directory,
