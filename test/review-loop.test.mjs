@@ -2448,12 +2448,15 @@ test("provider output limits settle without waiting for inherited pipes", async 
   const directory = mkdtempSync(path.join(os.tmpdir(), "review-loop-output-"));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const provider = path.join(directory, "provider.mjs");
+  const descendantPidFile = path.join(directory, "descendant.pid");
   writeFileSync(
     provider,
     `import { spawn } from "node:child_process";
-spawn(process.execPath, ["-e", "setTimeout(() => process.exit(0), 1500)"], {
+import { writeFileSync } from "node:fs";
+const descendant = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
   stdio: ["ignore", "inherit", "inherit"],
 });
+writeFileSync(process.env.DESCENDANT_PID_FILE, String(descendant.pid));
 process.stdout.write("x".repeat(4096));
 setInterval(() => {}, 1000);
 `,
@@ -2463,7 +2466,7 @@ setInterval(() => {}, 1000);
     { command: process.execPath, args: [provider] },
     {
       cwd: directory,
-      env: process.env,
+      env: { ...process.env, DESCENDANT_PID_FILE: descendantPidFile },
       timeoutMs: 5_000,
       maxCaptureBytes: 1_024,
     },
@@ -2473,6 +2476,11 @@ setInterval(() => {}, 1000);
   assert.match(result.stderr, /exceeded 1024 bytes/u);
   assert.equal(Date.now() - startedAt < 1_000, true);
   await result.childExited;
+  const descendantPid = Number(readFileSync(descendantPidFile, "utf8"));
+  assert.throws(
+    () => process.kill(descendantPid, 0),
+    (error) => error?.code === "ESRCH",
+  );
 });
 
 test("provider state cleanup runs when capture persistence fails", async (t) => {
@@ -2629,6 +2637,8 @@ test("check-commit-message validates a proposed repair commit", (t) => {
 
   for (const productSelector of [
     '- jest -t "reject per reviewer feedback"',
+    '- npx --yes jest -t "reject per reviewer feedback"',
+    '- npx -p jest jest -t "reject per reviewer feedback"',
     '- go test -run "reject per reviewer feedback"',
     '- npm test -- --testNamePattern "reject per reviewer feedback"',
     '- npm --silent test -- --testNamePattern "per reviewer feedback"',

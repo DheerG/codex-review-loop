@@ -3160,7 +3160,7 @@ export function captureProcess(invocation, options) {
     let capturedBytes = 0;
     let settled = false;
     let forcedKind = null;
-    let killTimer;
+    let terminating = false;
     let timer;
     let resolveChildExited;
     const childExited = new Promise((resolveExit) => {
@@ -3170,22 +3170,36 @@ export function captureProcess(invocation, options) {
     const child = spawn(invocation.command, invocation.args, {
       cwd: options.cwd,
       env: options.env,
+      detached: process.platform !== "win32",
       shell: false,
       stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
     });
 
-    const finish = (value, preserveKillTimer = false) => {
+    const finish = (value) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      if (!preserveKillTimer) clearTimeout(killTimer);
       resolve({ ...value, childExited });
     };
     const terminate = () => {
-      if (killTimer) return;
-      child.kill("SIGTERM");
-      killTimer = setTimeout(() => child.kill("SIGKILL"), 2_000);
-      killTimer.unref();
+      if (terminating) return;
+      terminating = true;
+      if (process.platform === "win32") {
+        const killed = spawnSync(
+          "taskkill",
+          ["/pid", String(child.pid), "/T", "/F"],
+          { stdio: "ignore", windowsHide: true },
+        );
+        if (killed.status !== 0) child.kill("SIGKILL");
+      } else {
+        try {
+          process.kill(-child.pid, "SIGKILL");
+        } catch (error) {
+          if (error?.code !== "ESRCH") throw error;
+          child.kill("SIGKILL");
+        }
+      }
     };
     const append = (kind, chunk) => {
       if (forcedKind) return;
@@ -3196,7 +3210,7 @@ export function captureProcess(invocation, options) {
         terminate();
         child.stdout.destroy();
         child.stderr.destroy();
-        finish({ ok: false, kind: forcedKind, stdout, stderr }, true);
+        finish({ ok: false, kind: forcedKind, stdout, stderr });
         return;
       }
       if (kind === "stdout") stdout += chunk.toString("utf8");
@@ -3206,11 +3220,9 @@ export function captureProcess(invocation, options) {
     child.stdout.on("data", (chunk) => append("stdout", chunk));
     child.stderr.on("data", (chunk) => append("stderr", chunk));
     child.once("exit", () => {
-      clearTimeout(killTimer);
       resolveChildExited();
     });
     child.on("error", (error) => {
-      clearTimeout(killTimer);
       resolveChildExited();
       finish({
         ok: false,
@@ -3232,7 +3244,7 @@ export function captureProcess(invocation, options) {
       terminate();
       child.stdout.destroy();
       child.stderr.destroy();
-      finish({ ok: false, kind: forcedKind, stdout, stderr }, true);
+      finish({ ok: false, kind: forcedKind, stdout, stderr });
     }, options.timeoutMs);
     timer.unref();
 
@@ -4140,6 +4152,37 @@ function shellWords(text) {
   return words;
 }
 
+const LAUNCHER_OPTIONS_WITH_VALUES = new Set([
+  "--call",
+  "--package",
+  "--package-manager",
+  "-c",
+  "-p",
+]);
+
+function shellCommandAfterOptions(text) {
+  let remaining = text.trimStart();
+  while (remaining) {
+    const parsed = shellWordAndRest(remaining);
+    if (!parsed) return null;
+    if (parsed.word === "--") {
+      remaining = parsed.rest.trimStart();
+      continue;
+    }
+    if (!parsed.word.startsWith("-")) return parsed;
+    remaining = parsed.rest.trimStart();
+    if (
+      !parsed.word.includes("=") &&
+      LAUNCHER_OPTIONS_WITH_VALUES.has(parsed.word)
+    ) {
+      const value = shellWordAndRest(remaining);
+      if (!value) return null;
+      remaining = value.rest.trimStart();
+    }
+  }
+  return null;
+}
+
 const PACKAGE_OPTIONS_WITH_VALUES = new Set([
   "--cache",
   "--cwd",
@@ -4194,7 +4237,7 @@ function testSelectorContext(command) {
   let args = invocation.rest;
   let selectorOffset = 0;
   if (["bunx", "npx"].includes(executable)) {
-    invocation = shellWordAndRest(args.trimStart());
+    invocation = shellCommandAfterOptions(args);
     if (!invocation) return null;
     executable = shellExecutableName(invocation.word);
     args = invocation.rest;
@@ -4203,7 +4246,9 @@ function testSelectorContext(command) {
     ["pnpm", "yarn"].includes(executable) &&
     /^(?:dlx|exec)\s+/u.test(args)
   ) {
-    invocation = shellWordAndRest(args.replace(/^(?:dlx|exec)\s+/u, ""));
+    invocation = shellCommandAfterOptions(
+      args.replace(/^(?:dlx|exec)\s+/u, ""),
+    );
     if (!invocation) return null;
     executable = shellExecutableName(invocation.word);
     args = invocation.rest;
@@ -4219,7 +4264,7 @@ function testSelectorContext(command) {
     ["pdm", "pipenv", "poetry", "rye", "uv"].includes(executable) &&
     /^run\s+/u.test(args)
   ) {
-    invocation = shellWordAndRest(
+    invocation = shellCommandAfterOptions(
       args.replace(/^run\s+(?:--\s+)?/u, ""),
     );
     if (!invocation) return null;
