@@ -2216,6 +2216,8 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "- npm test -- retry # Reviewed by Codex",
     "- codex requested this change",
     "- claude suggested this patch",
+    '- $ echo "Reviewed by Codex"',
+    '- `echo "Reviewed by Codex"`',
   ]) {
     result = invoke(
       directory,
@@ -2577,6 +2579,17 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     env,
     "check-commit-message",
     "--subject",
+    "Preserve folded contributor certification",
+    "--body",
+    `${narrativeCommitBody}\n\nSigned-off-by:\n Claude Shannon <claude@example.com>`,
+  );
+  assert.equal(result.status, 0, result.stdout);
+
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
     "Preserve generated provider responses",
     "--body",
     "AI-generated responses retain their metadata.",
@@ -2802,6 +2815,8 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "Co-authored-by: ChatGPT-4o <bot@example.com>",
     "Reviewed-by: Codex Team <team@example.com>",
     "Signed-off-by: OpenAI Maintainers <maintainers@example.com>",
+    "Co-authored-by:\n Codex",
+    "Reviewed-by:\n Codex Team <team@example.com>",
   ]) {
     result = invoke(
       directory,
@@ -2942,6 +2957,8 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "Apply Aider suggestions",
     "Address Aider's feedback",
     "Resolve the AI reviewer's findings",
+    "Honor reviewer feedback",
+    "Follow reviewer feedback",
   ]) {
     result = invoke(
       directory,

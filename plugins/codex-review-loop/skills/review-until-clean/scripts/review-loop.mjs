@@ -3420,6 +3420,7 @@ const WORKFLOW_ATTRIBUTION_PATTERNS = [
   /\b(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?review(?:er)?\s+)?(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance)\s+(?:prompted|caused|drove|motivated|triggered|led\s+to|resulted\s+in)\s+(?:(?:this|the|these)\s+)?(?:changes?|code|implementation|commits?|patch|work)\b/iu,
   /\bper\s+(?:(?:the|a)\s+(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?(?:review|reviewer|feedback|findings?|comments?)|(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))|(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?review(?:er)?\s+(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu,
   /\bfollowing\s+(?:(?:the|a)\s+)?(?:(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?review(?:er)?\s+)?(?:feedback|findings?|comments?)|(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?review(?:er)?|(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode))\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu,
+  /\b(?:honor(?:s|ed|ing)?|follow(?:s|ed|ing)?|heed(?:s|ed|ing)?|adopt(?:s|ed|ing)?|accept(?:s|ed|ing)?|act(?:s|ed|ing)?\s+on|comply(?:ies|ied|ing)?\s+with|conform(?:s|ed|ing)?\s+to|align(?:s|ed|ing)?\s+with)\s+(?:(?:the|a)\s+)?(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+(?:review(?:er)?\s+)?|review(?:er)?\s+)(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance)\b/iu,
   /\b(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?review(?:er)?\s+(?:asked|requested|required|suggested|said|recommended|instructed|flagged|identified)\b/iu,
   /\b(?:(?:an?|the)\s+)?(?:(?:ai|llm)(?:\s+review(?:er)?)?|review(?:er)?)\s+(?:found|identified|reported|flagged|raised|caught|suggested|requested|required)\b/iu,
   /\b(?:found|identified|reported|flagged|raised|caught|suggested|requested|required)\s+(?:by|during|in|from|through)\s+(?:(?:an?|the)\s+)?(?:(?:ai|llm)(?:\s+review(?:er)?)?|review(?:er)?)\b/iu,
@@ -3608,7 +3609,7 @@ function isCommandShapedVerification(text) {
     const command = withoutLeadingEnvironmentAssignments(shellPrompt[1]);
     return (
       !startsWithWorkflowAttribution(command) &&
-      !startsWithExplicitAiAuthorship(command) &&
+      !hasExplicitAiAuthorship(command) &&
       !hasAttributedShellComment(command)
     );
   }
@@ -3619,7 +3620,7 @@ function isCommandShapedVerification(text) {
     );
     return (
       !startsWithWorkflowAttribution(command) &&
-      !startsWithExplicitAiAuthorship(command) &&
+      !hasExplicitAiAuthorship(command) &&
       !hasAttributedShellComment(command)
     );
   }
@@ -3645,6 +3646,7 @@ function isCommandShapedVerification(text) {
   const explicitSyntax =
     hasEnvironment || pathCommand || hasUnambiguousShellSyntax(text);
   if (!commonCommand && !explicitSyntax) return false;
+  if (hasExplicitAiAuthorship(text)) return false;
   if (
     !explicitSyntax &&
     /^(?:claude|codex|gemini|opencode)$/u.test(executable ?? "") &&
@@ -3831,11 +3833,12 @@ function startsWithExplicitAiAuthorship(text) {
 
 function hasAiAttributionTrailer(message) {
   const trailers = message.matchAll(new RegExp(
-    String.raw`^[\t ]*(?:[-*]\s+)?(?:[A-Za-z0-9][A-Za-z0-9-]*-(?:by|with)|${AI_AUTHORSHIP_ACTION_SOURCE})[\t ]*:(?<identity>.*)$`,
+    String.raw`^[\t ]*(?:[-*]\s+)?(?:[A-Za-z0-9][A-Za-z0-9-]*-(?:by|with)|${AI_AUTHORSHIP_ACTION_SOURCE})[\t ]*:(?<identity>[^\r\n]*(?:\r?\n[\t ]+[^\r\n]*)*)`,
     "gimu",
   ));
   return [...trailers].some((trailer) => {
     const displayIdentity = trailer.groups.identity
+      .replace(/\r?\n[\t ]+/gu, " ")
       .replace(/<[^<>]*>\s*$/u, "")
       .trim();
     const decoratedCandidates = [
