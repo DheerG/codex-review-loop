@@ -85,18 +85,21 @@ class CliError extends Error {
   }
 }
 
-async function boundedCodexRun(args) {
+async function boundedCodexRun(timeoutMs, args) {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) return 2;
   const child = spawn("codex", args, {
     detached: process.platform !== "win32",
     stdio: ["inherit", "inherit", "inherit"],
     windowsHide: true,
   });
   let settled = false;
+  let deadline;
   const handlers = new Map();
   const removeHandlers = () => {
     for (const [signal, handler] of handlers) {
       process.removeListener(signal, handler);
     }
+    deadline?.removeEventListener("abort", terminate);
   };
   const terminate = () => {
     if (settled) return;
@@ -118,6 +121,8 @@ async function boundedCodexRun(args) {
     handlers.set(signal, terminate);
     process.once(signal, terminate);
   }
+  deadline = AbortSignal.timeout(timeoutMs);
+  deadline.addEventListener("abort", terminate, { once: true });
   return new Promise((resolve) => {
     child.once("error", (error) => {
       settled = true;
@@ -137,7 +142,14 @@ function run(command, args, options = {}) {
   const boundedCodex = command === "codex" && options.timeoutMs;
   const result = spawnSync(
     boundedCodex ? process.execPath : command,
-    boundedCodex ? [SKILL_SCRIPT, INTERNAL_BOUNDED_CODEX_RUN, ...args] : args,
+    boundedCodex
+      ? [
+          SKILL_SCRIPT,
+          INTERNAL_BOUNDED_CODEX_RUN,
+          String(Math.max(1, Math.floor(options.timeoutMs * 0.9))),
+          ...args,
+        ]
+      : args,
     {
       cwd: options.cwd,
       encoding: "utf8",
@@ -151,6 +163,9 @@ function run(command, args, options = {}) {
   );
   if (result.error) {
     throw new CliError(`${command} could not run: ${result.error.message}`, 2);
+  }
+  if (boundedCodex && result.status === 124) {
+    throw new CliError(`${command} could not run: timed out.`, 2);
   }
   if (!options.allowFailure && result.status !== 0) {
     const detail = (result.stderr || result.stdout || "").trim();
@@ -1099,6 +1114,103 @@ function tomlStringArrayValue(value, source) {
   return entries.map((entry) => tomlStringValue(entry, source));
 }
 
+function tomlArrayEntries(value, source) {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) {
+    throw new CliError(`Cannot parse a TOML array in ${source}.`, 3);
+  }
+  const entries = [];
+  let start = 1;
+  let depth = 0;
+  let quote = null;
+  let escaped = false;
+  for (let index = 1; index < trimmed.length - 1; index += 1) {
+    const character = trimmed[index];
+    if (quote === '"') {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === quote) quote = null;
+      continue;
+    }
+    if (quote === "'") {
+      if (character === quote) quote = null;
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      quote = character;
+    } else if (character === "[" || character === "{") {
+      depth += 1;
+    } else if (character === "]" || character === "}") {
+      depth -= 1;
+    } else if (character === "," && depth === 0) {
+      entries.push(trimmed.slice(start, index).trim());
+      start = index + 1;
+    }
+    if (depth < 0) {
+      throw new CliError(`Cannot parse a TOML array in ${source}.`, 3);
+    }
+  }
+  if (quote || depth !== 0) {
+    throw new CliError(`Cannot parse a TOML array in ${source}.`, 3);
+  }
+  entries.push(trimmed.slice(start, -1).trim());
+  if (entries.at(-1) === "") entries.pop();
+  if (entries.some((entry) => !entry)) {
+    throw new CliError(`Cannot parse a TOML array in ${source}.`, 3);
+  }
+  return entries;
+}
+
+function decodedTomlValue(value, source) {
+  const trimmed = value.trim();
+  if (['"', "'"].includes(trimmed[0]) ||
+      trimmed.startsWith('"""') || trimmed.startsWith("'''")) {
+    return ["string", tomlStringValue(trimmed, source)];
+  }
+  if (trimmed.startsWith("[")) {
+    return [
+      "array",
+      tomlArrayEntries(trimmed, source).map((entry) =>
+        decodedTomlValue(entry, source),
+      ),
+    ];
+  }
+  if (trimmed.startsWith("{")) {
+    const entries = inlineTomlTableEntries(trimmed, source).map((entry) => [
+      JSON.stringify(entry.parts),
+      decodedTomlValue(entry.value, source),
+    ]);
+    entries.sort(([left], [right]) => left.localeCompare(right));
+    return ["table", entries];
+  }
+  if (trimmed === "true" || trimmed === "false") {
+    return ["boolean", trimmed === "true"];
+  }
+  const compact = trimmed.replace(/_/gu, "");
+  if (/^[+-]?[0-9]+$/u.test(compact)) {
+    return ["integer", BigInt(compact).toString()];
+  }
+  if (/^0(?:x[0-9a-f]+|o[0-7]+|b[01]+)$/iu.test(compact)) {
+    return ["integer", BigInt(compact).toString()];
+  }
+  if (
+    /^[+-]?(?:(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:e[+-]?[0-9]+)?|inf|nan)$/iu.test(
+      compact,
+    )
+  ) {
+    const numeric = Number(compact);
+    return [
+      "float",
+      Number.isNaN(numeric) ? "nan" : String(numeric).toLowerCase(),
+    ];
+  }
+  return ["bare", compact];
+}
+
+function canonicalTomlValue(value, source) {
+  return JSON.stringify(decodedTomlValue(value, source));
+}
+
 function advanceTomlContainerState(state, value) {
   for (const character of value) {
     if (state.quote === '"') {
@@ -1320,7 +1432,10 @@ function codexTransportState(records, source) {
       }
       configuredProviders
         .get(provider)
-        .set(JSON.stringify(record.parts.slice(2)), record.value?.trim() ?? "");
+        .set(
+          JSON.stringify(record.parts.slice(2)),
+          canonicalTomlValue(record.value ?? "", source),
+        );
     }
   }
   return {
@@ -3910,6 +4025,7 @@ function hasUnambiguousShellSyntax(text) {
 
 function isCommitSectionBoundary(line) {
   let heading = line.trim();
+  if (/^(?:=+|-+)$/u.test(heading)) return true;
   let previous;
   do {
     previous = heading;
@@ -4483,6 +4599,9 @@ export async function main(argv, runtime = {}) {
 if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(SKILL_SCRIPT)) {
   process.exitCode =
     process.argv[2] === INTERNAL_BOUNDED_CODEX_RUN
-      ? await boundedCodexRun(process.argv.slice(3))
+      ? await boundedCodexRun(
+          Number(process.argv[3]),
+          process.argv.slice(4),
+        )
       : await main(process.argv.slice(2));
 }

@@ -986,13 +986,13 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
       [
         {
           contents:
-            'profile = "system"\n[profiles.system]\nmodel_provider = "private"\n[profiles.system.model_providers.private]\nbase_url = "https://private.example.test"',
+            'profile = "system"\n[profiles.system]\nmodel_provider = "private"\n[profiles.system.model_providers.private]\nbase_url = \'https://private.example.test\'\ntest_values = ["alpha", "beta"]',
           file: "system config",
           retainedForReview: true,
         },
         {
           contents:
-            'profile = "user"\n[profiles.user]\nmodel = "private-review"\nmodel_provider = "private"\n[profiles.user.model_providers.private]\nbase_url = "https://private.example.test"',
+            'profile = "user"\n[profiles.user]\nmodel = "private-review"\nmodel_provider = "private"\n[profiles.user.model_providers.private]\nbase_url = "https://private.example.test"\ntest_values = [ "alpha" , "beta", ]',
           file: "user config",
           retainedForReview: false,
         },
@@ -2358,6 +2358,8 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "> ### Notes",
     "- ### Notes",
     "**### Notes**",
+    "Tests\n-----",
+    "Tests\n=====",
     "### Notes",
   ]) {
     result = invoke(
