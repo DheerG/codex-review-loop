@@ -3774,6 +3774,24 @@ function hasUnambiguousShellSyntax(text) {
   );
 }
 
+function isCommitSectionBoundary(line) {
+  let heading = line.trim();
+  if (/^#{1,6}\s+\S.*$/u.test(heading)) return true;
+  let previous;
+  do {
+    previous = heading;
+    heading = heading
+      .replace(/^>\s*/u, "")
+      .replace(/^(?:\d+[.)]|[-+*])\s+/u, "");
+  } while (heading !== previous);
+  let emphasized = heading.match(/^(\*\*|__|\*|_)(.+)\1$/u);
+  while (emphasized) {
+    heading = emphasized[2];
+    emphasized = heading.match(/^(\*\*|__|\*|_)(.+)\1$/u);
+  }
+  return /^[A-Za-z][^:\r\n]{0,80}:$/u.test(heading);
+}
+
 function verificationEvidenceLines(
   body,
   anySection = false,
@@ -3792,11 +3810,7 @@ function verificationEvidenceLines(
       commandContinues = false;
       continue;
     }
-    if (
-      /^(?:#{1,6}\s+\S.*|(?:\d+[.)]\s+)?[A-Za-z][^:\r\n]{0,80}:)\s*$/u.test(
-        line.trim(),
-      )
-    ) {
+    if (isCommitSectionBoundary(line)) {
       section = null;
       commandContinues = false;
       continue;

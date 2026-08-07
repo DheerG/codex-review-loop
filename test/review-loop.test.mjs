@@ -2286,6 +2286,10 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "Notes:",
     "Tests (CI):",
     "2. Notes:",
+    "**Notes:**",
+    "> Notes:",
+    "- **Notes:**",
+    "> 2. _Notes:_",
     "### Notes",
   ]) {
     result = invoke(
