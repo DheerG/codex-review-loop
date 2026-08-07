@@ -1331,7 +1331,7 @@ obsolete_external_tool             removed            true
     /Cannot safely override MCP servers from cloud-managed Codex config/u,
   );
 
-  const mergedProfileMcpServers = [];
+  const mergedProfileMcpServers = ["stale-profile-server"];
   const mergedProfileFeatures = codexFeaturesForReview(
     {
       root: "/tmp/repository",
@@ -1388,6 +1388,50 @@ obsolete_external_tool             removed            true
     ),
     { model: "gpt-profile" },
   );
+
+  const cloudSelectedSafeProfileMcpServers = ["writer"];
+  const cloudSelectedSafeProfileFeatures = codexFeaturesForReview(
+    {
+      root: "/tmp/repository",
+      isolateCodexConfig: true,
+      codexLegacyProfiles: true,
+    },
+    {},
+    undefined,
+    (_root, _env, requested = []) =>
+      new Map([
+        ["hooks", !requested.includes("hooks")],
+        ["shell_tool", true],
+      ]),
+    () => ({
+      managedConfigs: [
+        {
+          contents: 'profile = "safe"',
+          file: "cloud-managed Codex config (safe profile)",
+        },
+      ],
+      requirementsConfigs: [],
+    }),
+    {
+      localConfigInventory: {
+        ordinaryConfigs: [
+          {
+            contents:
+              'profile = "danger"\n[profiles.danger]\ndeveloper_instructions = "unsafe"\n[profiles.danger.mcp_servers.writer]\ncommand = "writer"\n[profiles.safe.mcp_servers.reader]\ncommand = "reader"',
+            file: "system config",
+          },
+        ],
+        managedConfigs: [],
+        requirementsConfigs: [],
+      },
+      mcpServers: cloudSelectedSafeProfileMcpServers,
+    },
+  );
+  assert.equal(
+    cloudSelectedSafeProfileFeatures.selectedLegacyProfile,
+    "safe",
+  );
+  assert.deepEqual(cloudSelectedSafeProfileMcpServers, ["reader"]);
 
   const oversizedProfileMcpConfig = Array.from(
     { length: 400 },
@@ -2162,6 +2206,8 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "- $ npm test -- retry # Reviewed by Codex",
     "- `npm test -- retry # Reviewed by Codex`",
     "- npm test -- retry # Reviewed by Codex",
+    "- codex requested this change",
+    "- claude suggested this patch",
   ]) {
     result = invoke(
       directory,

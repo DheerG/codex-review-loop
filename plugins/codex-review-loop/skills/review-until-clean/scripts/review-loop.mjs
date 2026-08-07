@@ -1844,14 +1844,7 @@ function configuredCodexMcpServers(state, env) {
     });
   }
 
-  let selectedLegacyProfile = null;
-  if (legacyProfiles) {
-    selectedLegacyProfile = codexSelectedLegacyProfileFromConfigs([
-      ...ordinaryConfigs,
-      ...managedConfigs,
-    ]);
-  }
-  const options = { legacyProfiles, selectedLegacyProfile };
+  const options = { legacyProfiles, selectedLegacyProfile: null };
   const names = new Set();
   for (const config of ordinaryConfigs) {
     const promptHazards = codexPromptHazardsFromToml(
@@ -1889,7 +1882,7 @@ function configuredCodexMcpServers(state, env) {
       config.contents,
       config.file,
       legacyProfiles,
-      selectedLegacyProfile,
+      null,
     );
   }
   return withCodexIsolationMetadata([...names].sort(), {
@@ -2420,7 +2413,7 @@ function assertCloudCodexConfigurationSafe(
     ? codexSelectedLegacyProfileFromConfigs(preferenceConfigs)
     : null;
   const configOptions = { legacyProfiles, selectedLegacyProfile };
-  const mcpNames = new Set(reviewOptions.mcpServers ?? []);
+  const mcpNames = new Set();
   for (const config of ordinaryConfigs) {
     const promptHazards = codexPromptHazardsFromToml(
       config.contents,
@@ -3414,6 +3407,10 @@ const WORKFLOW_ATTRIBUTION_PATTERNS = [
     String.raw`\b${AI_ATTRIBUTION_IDENTITY_SOURCE}\s+review(?:er)?\s+(?:asked|requested|required|suggested|said|recommended|instructed|flagged|identified)\b`,
     "iu",
   ),
+  new RegExp(
+    String.raw`\b${AI_ATTRIBUTION_IDENTITY_SOURCE}\s+(?:found|identified|reported|flagged|raised|caught|suggested|requested|required|recommended|instructed)\s+(?:(?:this|the|these|those|an?)\s+)?(?:changes?|patch|implementation|code|fix|bug|issue|work)\b`,
+    "iu",
+  ),
   /\b(?:reviewed|generated|suggested|assisted|authored|co[ -]?authored|written|created|made|produced)\s+(?:by|with)\s+(?:(?:an?|the)\s+)?(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode|ai|llm|reviewer)\b/iu,
   /\b(?:(?:an?|the)\s+)?(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode|ai|llm|reviewer)[\s-]+(?:reviewed|generated|suggested|assisted|authored|co[ -]?authored|written|created|made|produced)\b/iu,
   /\b(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance)\s+(?:from|by)\s+(?:(?:an?|the)\s+)?(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode|ai|llm|reviewer)\b/iu,
@@ -3649,6 +3646,13 @@ function isCommandShapedVerification(text) {
   const explicitSyntax =
     hasEnvironment || pathCommand || hasUnambiguousShellSyntax(text);
   if (!commonCommand && !explicitSyntax) return false;
+  if (
+    !explicitSyntax &&
+    /^(?:claude|codex|gemini|opencode)$/u.test(executable ?? "") &&
+    PRODUCT_TERM_PATTERNS.some((pattern) => pattern.test(text))
+  ) {
+    return false;
+  }
   const attributionLike = hasWorkflowAttribution(text);
   return !hasAttributedShellComment(text) && (!attributionLike || explicitSyntax);
 }
