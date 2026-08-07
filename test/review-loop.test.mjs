@@ -2731,6 +2731,8 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     '- npm --silent test -- --testNamePattern "per reviewer feedback"',
     '- npm run test:unit -- --grep "per reviewer feedback"',
     '- npm run-script test -- --grep "per reviewer feedback"',
+    '- npm exec -- jest -t "reject per reviewer feedback"',
+    '- npm exec -c \'jest -t "reject per reviewer feedback"\'',
     '- pnpm test -- --test-name-pattern "reject per reviewer feedback"',
     '- pnpm --filter workspace test -- --grep "per reviewer feedback"',
     '- yarn test -- --grep "reject per reviewer feedback"',
@@ -3093,6 +3095,27 @@ test("check-commit-message validates a proposed repair commit", (t) => {
   );
   assert.equal(result.status, 2);
   assert.match(result.stdout, /AI-workflow attribution/u);
+
+  for (const incompleteVerification of [
+    "- npm test &&",
+    `- npm test ${"\\"}`,
+    "- npm test &&\n\nRationale:\nThe command must remain complete.",
+  ]) {
+    result = invoke(
+      directory,
+      env,
+      "check-commit-message",
+      "--subject",
+      "Reject incomplete verification evidence",
+      "--body",
+      narrativeCommitBody.replace(
+        "- npm test -- retry\n- npm run validate",
+        incompleteVerification,
+      ),
+    );
+    assert.equal(result.status, 2, incompleteVerification);
+    assert.match(result.stdout, /Verification.*exact command/u);
+  }
 
   const longEnvironmentContinuation = `  BAR="${"preserve environment continuation ".repeat(5).trim()}" \\`;
   result = invoke(

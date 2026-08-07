@@ -4217,9 +4217,14 @@ function shellCommandAfterOptions(text) {
   return null;
 }
 
-function npxCommandValue(command) {
+function launcherCommandValue(command) {
   const invocation = shellWordAndRest(command.trimStart());
-  if (!invocation || shellExecutableName(invocation.word) !== "npx") {
+  if (!invocation) return null;
+  const executable = shellExecutableName(invocation.word);
+  if (
+    executable !== "npx" &&
+    !(executable === "npm" && /^exec(?:\s|$)/u.test(invocation.rest))
+  ) {
     return null;
   }
   const match = invocation.rest.match(
@@ -4299,6 +4304,13 @@ function testSelectorContext(command) {
   let selectorOffset = 0;
   if (["bunx", "npx"].includes(executable)) {
     invocation = shellCommandAfterOptions(args);
+    if (!invocation) return null;
+    resolvedWord = invocation.word;
+    executable = shellExecutableName(invocation.word);
+    args = invocation.rest;
+    selectorOffset = command.length - args.length;
+  } else if (executable === "npm" && /^exec(?:\s|$)/u.test(args)) {
+    invocation = shellCommandAfterOptions(args.replace(/^exec\s+/u, ""));
     if (!invocation) return null;
     resolvedWord = invocation.word;
     executable = shellExecutableName(invocation.word);
@@ -4437,7 +4449,7 @@ function escapeRegularExpression(text) {
 function commandAttributionProse(text, allowProductTerms) {
   if (!allowProductTerms) return text;
   const { prefix, command } = shellCommandWithPrefix(text);
-  const nestedCommand = npxCommandValue(command);
+  const nestedCommand = launcherCommandValue(command);
   if (nestedCommand) {
     const nestedProse = commandAttributionProse(
       nestedCommand.command,
@@ -4601,12 +4613,19 @@ function verificationEvidenceLines(
   let commandContinues = false;
   let continuedCommand = "";
   let continuedEvidence = [];
+  const discardContinuedEvidence = () => {
+    for (const evidenceIndex of continuedEvidence) {
+      evidence.delete(evidenceIndex);
+    }
+    continuedEvidence = [];
+  };
   const lines = body.split(/\r?\n/u);
   for (const [index, line] of lines.entries()) {
     const heading = line.trim().match(
       /^(Failure|Change|Rationale|Verification):\s*$/u,
     );
     if (heading) {
+      discardContinuedEvidence();
       section = heading[1];
       commandContinues = false;
       continuedCommand = "";
@@ -4625,6 +4644,7 @@ function verificationEvidenceLines(
         : "";
       continuedEvidence = commandContinues ? [index] : [];
     } else if (isCommitSectionBoundary(line)) {
+      discardContinuedEvidence();
       section = null;
       commandContinues = false;
       continuedCommand = "";
@@ -4650,19 +4670,18 @@ function verificationEvidenceLines(
           continuedCommand = "";
         }
       } else {
-        for (const evidenceIndex of continuedEvidence) {
-          evidence.delete(evidenceIndex);
-        }
+        discardContinuedEvidence();
         commandContinues = false;
         continuedCommand = "";
-        continuedEvidence = [];
       }
     } else {
+      if (commandContinues) discardContinuedEvidence();
       commandContinues = false;
       continuedCommand = "";
       continuedEvidence = [];
     }
   }
+  if (commandContinues) discardContinuedEvidence();
   return evidence;
 }
 
