@@ -560,9 +560,19 @@ function codexAvailability(env, context = undefined) {
     isolateCodexConfig: Boolean(context?.isolateCodexConfig),
   };
   try {
-    codexMcpServersForReview(state, env);
+    const mcpServers = codexMcpServersForReview(state, env);
     codexReviewPreferencesForReview(state, env);
-    codexFeaturesForReview(state, env, context?.storage);
+    codexFeaturesForReview(
+      state,
+      env,
+      context?.storage,
+      undefined,
+      undefined,
+      {
+        localConfigInventory: mcpServers.localConfigInventory,
+        mcpServers,
+      },
+    );
     return { available: true };
   } catch (error) {
     return { available: false, reason: error.message };
@@ -1721,7 +1731,71 @@ function configuredCodexMcpServers(state, env) {
   );
   return withCodexIsolationMetadata([...names].sort(), {
     usesReadOnlyDefaultPermissions,
+    localConfigInventory: {
+      ordinaryConfigs,
+      managedConfigs,
+      requirementsConfigs,
+    },
   });
+}
+
+export function codexAuthOverridesFromToml(
+  contents,
+  source = "Codex user config",
+  options = {},
+) {
+  const { records, selectedLegacyProfile: localSelectedProfile } =
+    codexConfigRecords(contents, source);
+  let mode;
+  for (const record of effectiveCodexRecords(
+    records,
+    options,
+    localSelectedProfile,
+  )) {
+    if (
+      record.parts.length === 1 &&
+      record.parts[0] === "cli_auth_credentials_store"
+    ) {
+      mode = tomlStringValue(record.value ?? "", source);
+    }
+  }
+  if (mode === undefined || mode === "auto" || mode === "file") return [];
+  if (mode === "keyring") {
+    return ['cli_auth_credentials_store="keyring"'];
+  }
+  throw new CliError(
+    `Cannot preserve unsupported Codex authentication storage mode ${JSON.stringify(mode)}.`,
+    3,
+  );
+}
+
+function configuredCodexAuthOverrides(state, env) {
+  const userConfig = codexConfigFile(path.join(codexHome(env), "config.toml"));
+  if (!userConfig) return [];
+  const legacyProfiles = codexUsesLegacyProfiles(state, env);
+  const configs = [];
+  const systemConfig = codexConfigFile(codexSystemConfig(env));
+  if (systemConfig) configs.push(systemConfig);
+  configs.push(userConfig);
+  for (const managedFile of codexManagedConfigPaths(env)) {
+    const config = codexConfigFile(managedFile);
+    if (config) configs.push(config);
+  }
+  const managedPreference = codexManagedPreference(env);
+  if (managedPreference) {
+    configs.push({
+      contents: managedPreference,
+      file: "managed Codex preferences",
+    });
+  }
+  const selectedLegacyProfile = legacyProfiles
+    ? codexSelectedLegacyProfileFromConfigs(configs)
+    : null;
+  return codexAuthOverridesFromToml(
+    userConfig.contents,
+    userConfig.file,
+    { legacyProfiles, selectedLegacyProfile },
+  );
 }
 
 function configuredCodexReviewPreferences(state, env) {
@@ -1812,18 +1886,21 @@ function runCodexFeatureList(root, env, disabledFeatures = []) {
   return parseCodexFeatureList(result.stdout);
 }
 
-function copyCodexIdentityForProbe(sourceEnv, temporaryHome) {
+function copyCodexIdentityForProbe(state, sourceEnv, temporaryHome) {
+  const authOverrides = configuredCodexAuthOverrides(state, sourceEnv);
   const source = path.join(codexHome(sourceEnv), "auth.json");
-  if (!existsSync(source)) return;
-  const identity = readBoundedCodexRuntimeFile(
-    source,
-    MAX_CODEX_IDENTITY_BYTES,
-    "Codex authentication identity",
-  );
-  writeFileSync(path.join(temporaryHome, "auth.json"), identity, {
-    flag: "wx",
-    mode: 0o600,
-  });
+  if (existsSync(source)) {
+    const identity = readBoundedCodexRuntimeFile(
+      source,
+      MAX_CODEX_IDENTITY_BYTES,
+      "Codex authentication identity",
+    );
+    writeFileSync(path.join(temporaryHome, "auth.json"), identity, {
+      flag: "wx",
+      mode: 0o600,
+    });
+  }
+  return authOverrides;
 }
 
 function cloudFragments(bundle, key, label) {
@@ -1885,17 +1962,63 @@ export function parseCodexCloudBundleCache(contents) {
   };
 }
 
+export function parseCodexCloudRequirementsCache(contents) {
+  let parsed;
+  try {
+    parsed = JSON.parse(contents);
+  } catch (error) {
+    throw new CliError(
+      `Cannot parse the legacy Codex cloud requirements cache: ${error.message}`,
+      3,
+    );
+  }
+  const requirements = parsed?.signed_payload?.contents;
+  if (requirements === null) return [];
+  if (typeof requirements !== "string") {
+    throw new CliError(
+      "Cannot parse the legacy Codex cloud requirements cache.",
+      3,
+    );
+  }
+  if (Buffer.byteLength(requirements, "utf8") > MAX_CODEX_CONFIG_BYTES) {
+    throw new CliError(
+      `Legacy cloud-managed Codex requirements exceed ${MAX_CODEX_CONFIG_BYTES} bytes.`,
+      3,
+    );
+  }
+  return [
+    {
+      contents: requirements,
+      file: "legacy cloud-managed Codex requirements",
+    },
+  ];
+}
+
 function readCodexCloudBundle(temporaryHome) {
   const cache = path.join(temporaryHome, "cloud-config-bundle-cache.json");
-  if (!existsSync(cache)) {
+  if (existsSync(cache)) {
+    const bytes = readBoundedCodexRuntimeFile(
+      cache,
+      MAX_CODEX_CLOUD_CACHE_BYTES,
+      "Codex cloud configuration cache",
+    );
+    return parseCodexCloudBundleCache(bytes.toString("utf8"));
+  }
+  const legacyCache = path.join(temporaryHome, "cloud-requirements-cache.json");
+  if (!existsSync(legacyCache)) {
     return { managedConfigs: [], requirementsConfigs: [] };
   }
   const bytes = readBoundedCodexRuntimeFile(
-    cache,
+    legacyCache,
     MAX_CODEX_CLOUD_CACHE_BYTES,
-    "Codex cloud configuration cache",
+    "legacy Codex cloud requirements cache",
   );
-  return parseCodexCloudBundleCache(bytes.toString("utf8"));
+  return {
+    managedConfigs: [],
+    requirementsConfigs: parseCodexCloudRequirementsCache(
+      bytes.toString("utf8"),
+    ),
+  };
 }
 
 function runCodexManagedConfigProbe(
@@ -1903,6 +2026,7 @@ function runCodexManagedConfigProbe(
   env,
   temporaryHome,
   disabledFeatures,
+  authOverrides = [],
 ) {
   const missingSchema = path.join(
     temporaryHome,
@@ -1917,6 +2041,7 @@ function runCodexManagedConfigProbe(
     "-c",
     codexProjectUntrustedOverride(root),
   ];
+  for (const override of authOverrides) args.push("-c", override);
   for (const feature of disabledFeatures) args.push("--disable", feature);
   args.push(
     "-c",
@@ -1945,18 +2070,64 @@ function runCodexManagedConfigProbe(
   return readCodexCloudBundle(temporaryHome);
 }
 
-function assertCloudCodexConfigurationSafe(state, env, inventory) {
+function assertCloudCodexConfigurationSafe(
+  state,
+  env,
+  inventory,
+  reviewOptions = {},
+) {
   const cloudConfigs = inventory.managedConfigs ?? [];
+  const localInventory = reviewOptions.localConfigInventory ?? {};
+  const ordinaryConfigs = localInventory.ordinaryConfigs ?? [];
+  const managedConfigs = localInventory.managedConfigs ?? [];
+  const requirementsConfigs = localInventory.requirementsConfigs ?? [];
+  const mergedConfigs = [
+    ...ordinaryConfigs,
+    ...managedConfigs,
+    ...cloudConfigs,
+  ];
   const legacyProfiles =
-    cloudConfigs.length === 0
+    mergedConfigs.length === 0
       ? false
       : Object.hasOwn(state, "codexLegacyProfiles")
         ? Boolean(state.codexLegacyProfiles)
         : codexUsesLegacyProfiles(state, env);
   const selectedLegacyProfile = legacyProfiles
-    ? codexSelectedLegacyProfileFromConfigs(cloudConfigs)
+    ? codexSelectedLegacyProfileFromConfigs(mergedConfigs)
     : null;
-  for (const config of cloudConfigs) {
+  const configOptions = { legacyProfiles, selectedLegacyProfile };
+  const mcpNames = new Set(reviewOptions.mcpServers ?? []);
+  for (const config of ordinaryConfigs) {
+    const promptHazards = codexPromptHazardsFromToml(
+      config.contents,
+      config.file,
+      configOptions,
+    );
+    const approvalHazards = codexApprovalHazardsFromToml(
+      config.contents,
+      config.file,
+      configOptions,
+    );
+    if (promptHazards.length > 0 || approvalHazards.length > 0) {
+      throw new CliError(
+        `Cannot safely isolate Codex settings from ${config.file}: ${[
+          ...promptHazards,
+          ...approvalHazards,
+        ]
+          .sort()
+          .join(", ")}.`,
+        3,
+      );
+    }
+    for (const name of codexMcpNamesFromToml(
+      config.contents,
+      config.file,
+      configOptions,
+    )) {
+      mcpNames.add(name);
+    }
+  }
+  for (const config of [...managedConfigs, ...cloudConfigs]) {
     assertManagedCodexConfigSafe(
       config.contents,
       config.file,
@@ -1964,17 +2135,31 @@ function assertCloudCodexConfigurationSafe(state, env, inventory) {
       selectedLegacyProfile,
     );
   }
-  for (const config of inventory.requirementsConfigs ?? []) {
+  for (const config of [
+    ...requirementsConfigs,
+    ...(inventory.requirementsConfigs ?? []),
+  ]) {
     assertCodexRequirementsSafe(config.contents, config.file);
   }
-  const options = { legacyProfiles, selectedLegacyProfile };
-  return [...cloudConfigs, ...(inventory.requirementsConfigs ?? [])].some(
-    (config) =>
-      codexUsesReadOnlyDefaultPermissions(
-        config.contents,
-        config.file,
-        options,
-      ),
+  if (reviewOptions.mcpServers) {
+    reviewOptions.mcpServers.splice(
+      0,
+      reviewOptions.mcpServers.length,
+      ...[...mcpNames].sort(),
+    );
+  }
+  return [
+    ...ordinaryConfigs,
+    ...managedConfigs,
+    ...requirementsConfigs,
+    ...cloudConfigs,
+    ...(inventory.requirementsConfigs ?? []),
+  ].some((config) =>
+    codexUsesReadOnlyDefaultPermissions(
+      config.contents,
+      config.file,
+      configOptions,
+    ),
   );
 }
 
@@ -2008,24 +2193,28 @@ export function codexFeaturesForReview(
         3,
       );
     }
-    if (managedInventory === runCodexManagedConfigProbe) {
-      copyCodexIdentityForProbe(env, temporaryHome);
-    }
+    const authOverrides =
+      managedInventory === runCodexManagedConfigProbe
+        ? copyCodexIdentityForProbe(state, env, temporaryHome)
+        : [];
     const authenticated = managedInventory(
       state.root,
       probeEnv,
       temporaryHome,
       disabled,
+      authOverrides,
     );
     const usesReadOnlyDefaultPermissions = assertCloudCodexConfigurationSafe(
       state,
       probeEnv,
       authenticated,
+      options,
     );
     retained = Boolean(options.retainHome);
     return withCodexIsolationMetadata(disabled, {
       codexHome: retained ? temporaryHome : null,
       usesReadOnlyDefaultPermissions,
+      authOverrides,
     });
   } finally {
     if (temporaryHome && !retained) {
@@ -2055,6 +2244,9 @@ export function codexReviewArgs(
   ];
   if (!reviewConfig.usesReadOnlyDefaultPermissions) {
     args.splice(3, 0, "--sandbox", "read-only");
+  }
+  for (const override of reviewConfig.authOverrides ?? []) {
+    args.push("-c", override);
   }
   const reviewModel = preferences.review_model ?? preferences.model;
   if (reviewModel) args.push("--model", reviewModel);
@@ -2087,29 +2279,39 @@ function providerInvocation(state, prompt, env, repo) {
         repo.storage,
         runCodexFeatureList,
         runCodexManagedConfigProbe,
-        { retainHome: true },
+        {
+          retainHome: true,
+          localConfigInventory: mcpServers.localConfigInventory,
+          mcpServers,
+        },
       );
       const temporaryHome = disabledFeatures.codexHome;
-      return {
-        command: "codex",
-        args: codexReviewArgs(
-          Boolean(state.isolateCodexConfig),
-          mcpServers,
-          disabledFeatures,
-          {
-            root: state.root,
-            preferences,
-            usesReadOnlyDefaultPermissions: Boolean(
-              mcpServers.usesReadOnlyDefaultPermissions ||
-                disabledFeatures.usesReadOnlyDefaultPermissions,
-            ),
-          },
-        ),
-        input: prompt,
-        env: { ...env, CODEX_HOME: temporaryHome },
-        cleanup: () =>
-          rmSync(temporaryHome, { recursive: true, force: true }),
-      };
+      try {
+        return {
+          command: "codex",
+          args: codexReviewArgs(
+            Boolean(state.isolateCodexConfig),
+            mcpServers,
+            disabledFeatures,
+            {
+              root: state.root,
+              preferences,
+              usesReadOnlyDefaultPermissions: Boolean(
+                mcpServers.usesReadOnlyDefaultPermissions ||
+                  disabledFeatures.usesReadOnlyDefaultPermissions,
+              ),
+              authOverrides: disabledFeatures.authOverrides,
+            },
+          ),
+          input: prompt,
+          env: { ...env, CODEX_HOME: temporaryHome },
+          cleanup: () =>
+            rmSync(temporaryHome, { recursive: true, force: true }),
+        };
+      } catch (error) {
+        rmSync(temporaryHome, { recursive: true, force: true });
+        throw error;
+      }
     }
     case "gemini":
       return {
@@ -2492,7 +2694,6 @@ async function reviewCommand(repo, env) {
   }
   const before = snapshot(repo.root, state.base);
   const prompt = reviewPrompt(state, files);
-  const invocation = providerInvocation(state, prompt, env, repo);
   const timeoutMs = integerOption(
     env.CODEX_REVIEW_LOOP_TIMEOUT_MS,
     DEFAULT_TIMEOUT_MS,
@@ -2500,26 +2701,27 @@ async function reviewCommand(repo, env) {
     1_000,
     86_400_000,
   );
-
-  state.round += 1;
-  state.phase = "reviewing";
-  state.lastReview = {
-    status: "running",
-    round: state.round,
-    snapshot: before,
-    startedAt: new Date().toISOString(),
-  };
-  saveActive(repo, state);
-
+  let invocation;
   let result;
   try {
+    invocation = providerInvocation(state, prompt, env, repo);
+    state.round += 1;
+    state.phase = "reviewing";
+    state.lastReview = {
+      status: "running",
+      round: state.round,
+      snapshot: before,
+      startedAt: new Date().toISOString(),
+    };
+    saveActive(repo, state);
+
     result = await captureProcess(invocation, {
       cwd: repo.root,
       env: invocation.env ?? env,
       timeoutMs,
     });
   } finally {
-    invocation.cleanup?.();
+    invocation?.cleanup?.();
   }
   const rawFile = roundFile(repo, state, state.round);
   mkdirSync(path.dirname(rawFile), { recursive: true });
@@ -2881,7 +3083,7 @@ function hasExplicitAiAuthorship(text) {
 
 function hasAiAttributionTrailer(message) {
   const trailers = message.matchAll(
-    /^[\t ]*(?:[-*]\s+)?[A-Za-z0-9][A-Za-z0-9-]*-(?:by|with):(?<identity>.*)$/gimu,
+    /^[\t ]*(?:[-*]\s+)?[A-Za-z0-9][A-Za-z0-9-]*-(?:by|with)[\t ]*:(?<identity>.*)$/gimu,
   );
   return [...trailers].some((trailer) =>
     AI_ATTRIBUTION_IDENTITY.test(trailer.groups.identity),

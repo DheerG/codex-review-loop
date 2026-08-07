@@ -15,6 +15,7 @@ import test from "node:test";
 
 import {
   codexApprovalHazardsFromToml,
+  codexAuthOverridesFromToml,
   codexFeaturesForReview,
   codexManagedHazardsFromToml,
   codexManagedConfigPath,
@@ -30,6 +31,7 @@ import {
   codexSelectedLegacyProfileFromToml,
   inspectCommitMessage,
   parseCodexCloudBundleCache,
+  parseCodexCloudRequirementsCache,
   parseReview,
   parseCodexFeatureList,
   readBoundedCodexConfig,
@@ -265,9 +267,14 @@ test("Codex preserves allowlisted preferences and has no default round cap", () 
   const isolatedArgs = codexReviewArgs(true, [], [], {
     root: "/tmp/project",
     preferences: { model: "must-not-load" },
+    authOverrides: ['cli_auth_credentials_store="keyring"'],
   });
   assert.equal(isolatedArgs.includes("--ignore-user-config"), true);
   assert.equal(isolatedArgs.includes("must-not-load"), false);
+  assert.equal(
+    isolatedArgs.includes('cli_auth_credentials_store="keyring"'),
+    true,
+  );
   const defaultArgs = codexReviewArgs();
   assert.equal(defaultArgs.includes("guardian_approval"), true);
   assert.equal(defaultArgs.includes("guardianv2"), true);
@@ -517,6 +524,16 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
     ),
     { model: "gpt-profile", model_reasoning_effort: "high" },
   );
+  assert.deepEqual(
+    codexAuthOverridesFromToml(
+      'cli_auth_credentials_store = "keyring"',
+    ),
+    ['cli_auth_credentials_store="keyring"'],
+  );
+  assert.deepEqual(
+    codexAuthOverridesFromToml('cli_auth_credentials_store = "file"'),
+    [],
+  );
   assert.throws(
     () =>
       codexReviewPreferencesFromToml(
@@ -696,6 +713,23 @@ test("Codex feature probing adapts to supported flags and fails closed", () => {
     () => parseCodexCloudBundleCache('{"signed_payload":{}}'),
     /Cannot parse the Codex cloud configuration cache/u,
   );
+  const legacyRequirements = parseCodexCloudRequirementsCache(
+    JSON.stringify({
+      signed_payload: {
+        contents: 'allowed_sandbox_modes = ["read-only"]',
+      },
+    }),
+  );
+  assert.equal(
+    legacyRequirements[0].contents,
+    'allowed_sandbox_modes = ["read-only"]',
+  );
+  assert.deepEqual(
+    parseCodexCloudRequirementsCache(
+      JSON.stringify({ signed_payload: { contents: null } }),
+    ),
+    [],
+  );
 
   const parsed = parseCodexFeatureList(`
 hooks                              stable             true
@@ -833,6 +867,85 @@ obsolete_external_tool             removed            true
       ),
     /Cannot safely override MCP servers from cloud-managed Codex config/u,
   );
+
+  assert.throws(
+    () =>
+      codexFeaturesForReview(
+        {
+          root: "/tmp/repository",
+          isolateCodexConfig: true,
+          codexLegacyProfiles: true,
+        },
+        {},
+        undefined,
+        (_root, _env, requested = []) =>
+          new Map([
+            ["hooks", !requested.includes("hooks")],
+            ["shell_tool", true],
+          ]),
+        () => ({
+          managedConfigs: [
+            {
+              contents:
+                '[profiles.work.mcp_servers.writer]\ncommand = "writer"',
+              file: "cloud-managed Codex config (profile)",
+            },
+          ],
+          requirementsConfigs: [],
+        }),
+        {
+          localConfigInventory: {
+            ordinaryConfigs: [
+              { contents: 'profile = "work"', file: "system config" },
+            ],
+            managedConfigs: [],
+            requirementsConfigs: [],
+          },
+          mcpServers: [],
+        },
+      ),
+    /Cannot safely override MCP servers from cloud-managed Codex config/u,
+  );
+
+  const mergedProfileMcpServers = [];
+  codexFeaturesForReview(
+    {
+      root: "/tmp/repository",
+      isolateCodexConfig: true,
+      codexLegacyProfiles: true,
+    },
+    {},
+    undefined,
+    (_root, _env, requested = []) =>
+      new Map([
+        ["hooks", !requested.includes("hooks")],
+        ["shell_tool", true],
+      ]),
+    () => ({
+      managedConfigs: [
+        {
+          contents: 'profile = "work"',
+          file: "cloud-managed Codex config (profile selection)",
+        },
+      ],
+      requirementsConfigs: [],
+    }),
+    {
+      localConfigInventory: {
+        ordinaryConfigs: [
+          {
+            contents:
+              '[profiles.work.mcp_servers.reader]\ncommand = "reader"',
+            file: "system config",
+          },
+        ],
+        managedConfigs: [],
+        requirementsConfigs: [],
+      },
+      mcpServers: mergedProfileMcpServers,
+    },
+  );
+  assert.deepEqual(mergedProfileMcpServers, ["reader"]);
 
   const permissionProfileFeatures = codexFeaturesForReview(
     { root: "/tmp/repository", isolateCodexConfig: true },
@@ -1467,6 +1580,8 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "Tested-by: OpenCode",
     "Pair-programmed-with: Claude",
     "Co-authored-by: GPT-5",
+    "Co-authored-by : Codex",
+    "Co-authored-by\t:\tClaude",
     "Reviewed-by: reviewer",
     "  Co-authored-by: Codex",
     "Co-authored-by: GitHub Copilot <copilot@github.com>",
