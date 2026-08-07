@@ -8,6 +8,7 @@ import {
   constants,
   existsSync,
   fstatSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -1499,6 +1500,13 @@ export function codexRequirementsHazardsFromToml(
     } else if (key === "remote_sandbox_config") {
       hazards.add("remote_sandbox_config");
     } else if (
+      record.parts.length === 3 &&
+      key === "permissions" &&
+      child === "filesystem" &&
+      record.parts[2] === "deny_read"
+    ) {
+      hazards.add("permissions.filesystem.deny_read");
+    } else if (
       record.parts.length === 2 &&
       ["features", "feature_requirements"].includes(key) &&
       codexFeatureRequiresIsolation(child)
@@ -1980,19 +1988,36 @@ export function codexPreflightTimeout(env) {
   );
 }
 
-function copyCodexIdentityForProbe(state, sourceEnv, temporaryHome) {
+export function shareCodexIdentityForProbe(state, sourceEnv, temporaryHome) {
   const authOverrides = configuredCodexAuthOverrides(state, sourceEnv);
   const source = path.join(codexHome(sourceEnv), "auth.json");
   if (existsSync(source)) {
-    const identity = readBoundedCodexRuntimeFile(
+    readBoundedCodexRuntimeFile(
       source,
       MAX_CODEX_IDENTITY_BYTES,
       "Codex authentication identity",
     );
-    writeFileSync(path.join(temporaryHome, "auth.json"), identity, {
-      flag: "wx",
-      mode: 0o600,
-    });
+    const shared = path.join(temporaryHome, "auth.json");
+    try {
+      linkSync(source, shared);
+      const sourceDetails = lstatSync(source);
+      const sharedDetails = lstatSync(shared);
+      if (
+        !sourceDetails.isFile() ||
+        sourceDetails.isSymbolicLink() ||
+        !sharedDetails.isFile() ||
+        sharedDetails.isSymbolicLink() ||
+        sourceDetails.dev !== sharedDetails.dev ||
+        sourceDetails.ino !== sharedDetails.ino
+      ) {
+        throw new Error("the shared identity is not the authoritative file");
+      }
+    } catch (error) {
+      throw new CliError(
+        `Cannot safely share file-backed Codex authentication with the isolated reviewer: ${error.message}. Configure keyring authentication or keep the repository and Codex home on the same filesystem.`,
+        3,
+      );
+    }
   }
   return authOverrides;
 }
@@ -2382,7 +2407,7 @@ export function codexFeaturesForReview(
     }
     const authOverrides =
       managedInventory === runCodexManagedConfigProbe
-        ? copyCodexIdentityForProbe(state, env, temporaryHome)
+        ? shareCodexIdentityForProbe(state, env, temporaryHome)
         : [];
     const authenticated = managedInventory(
       state.root,
@@ -2721,6 +2746,8 @@ function parseCodexStructuredReview(text) {
   for (const finding of value.findings) {
     const title =
       typeof finding?.title === "string" ? finding.title : null;
+    const normalizedTitle =
+      title?.replace(/^\[P[0-3]\]\s*/u, "").trim() ?? "";
     const titlePriority = title?.match(/^\[P([0-3])\]\s*/u);
     const declaredPriority = finding?.priority;
     const priority =
@@ -2734,7 +2761,9 @@ function parseCodexStructuredReview(text) {
     if (
       !finding ||
       title === null ||
+      !normalizedTitle ||
       typeof finding.body !== "string" ||
+      !finding.body.trim() ||
       typeof finding.confidence_score !== "number" ||
       !Number.isFinite(finding.confidence_score) ||
       finding.confidence_score < 0 ||
@@ -2744,6 +2773,8 @@ function parseCodexStructuredReview(text) {
       priority > 3 ||
       (titlePriority && Number(titlePriority[1]) !== priority) ||
       typeof location?.absolute_file_path !== "string" ||
+      !location.absolute_file_path.trim() ||
+      !path.isAbsolute(location.absolute_file_path) ||
       !Number.isInteger(range?.start) ||
       !Number.isInteger(range?.end) ||
       range.start < 1 ||
@@ -2755,7 +2786,6 @@ function parseCodexStructuredReview(text) {
         reason: "Codex returned an invalid structured review finding.",
       };
     }
-    const normalizedTitle = title.replace(/^\[P[0-3]\]\s*/u, "").trim();
     findings.push({
       priority: `P${priority}`,
       title: normalizedTitle,
@@ -3178,6 +3208,7 @@ const WORKFLOW_ATTRIBUTION_PATTERNS = [
   /\b(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance)\s+(?:from|by)\s+(?:(?:an?|the)\s+)?(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode|ai|llm|reviewer)\b/iu,
   /\b(?:found|identified|reported|flagged|raised|caught|suggested|requested|required)\s+(?:by|during|in|from|through)\s+(?:(?:the|a)\s+)?(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?(?:review|reviewer|feedback|findings?|comments?)|(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu,
   /\b(?:based\s+on|because\s+of|prompted\s+by|in\s+response\s+to)\s+(?:(?:the|a)\s+)?(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?(?:review|reviewer|feedback|findings?|comments?)|(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu,
+  /\b(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?review(?:er)?\s+)?(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance)\s+(?:prompted|caused|drove|motivated|triggered|led\s+to|resulted\s+in)\s+(?:(?:this|the|these)\s+)?(?:changes?|code|implementation|commits?|patch|work)\b/iu,
   /\bper\s+(?:(?:the|a)\s+(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?(?:review|reviewer|feedback|findings?|comments?)|(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))|(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?review(?:er)?\s+(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu,
   /\bfollowing\s+(?:(?:the|a)\s+)?(?:(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?review(?:er)?\s+)?(?:feedback|findings?|comments?)|(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?review(?:er)?|(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode))\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu,
   /\b(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?review(?:er)?\s+(?:asked|requested|required|suggested|said|recommended|instructed|flagged|identified)\b/iu,
@@ -3425,7 +3456,7 @@ const AI_ATTRIBUTION_IDENTITY = new RegExp(
   "iu",
 );
 const AI_ATTRIBUTION_TRAILER_IDENTITY = new RegExp(
-  String.raw`^(?:(?:automated|generative)\s+)?${AI_ATTRIBUTION_IDENTITY_SOURCE}(?:\s+(?:assistant|agent|bot|reviewer|tool|cli|code|codex))?$`,
+  String.raw`^(?:(?:automated|generative)\s+)?${AI_ATTRIBUTION_IDENTITY_SOURCE}(?:\s+(?:assistant|agent|bot|reviewer|tool|cli|code|codex|developer|claude|gemini|chatgpt|gpt(?:-\d+(?:\.\d+)*)?)){0,3}$`,
   "iu",
 );
 const EXPLICIT_AI_AUTHORSHIP_PATTERNS = [

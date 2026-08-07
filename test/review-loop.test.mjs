@@ -42,6 +42,7 @@ import {
   readBoundedCodexConfig,
   reviewPrompt,
   reviewRoundLimit,
+  shareCodexIdentityForProbe,
 } from "../plugins/codex-review-loop/skills/review-until-clean/scripts/review-loop.mjs";
 
 const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
@@ -359,6 +360,36 @@ ${formattedVerdict}`,
     ).status,
     "invalid",
   );
+  for (const blankFinding of [
+    { title: "", body: "The retry path is broken." },
+    { title: "   ", body: "The retry path is broken." },
+    { title: "[P1] ", body: "The retry path is broken." },
+    { title: "Retry path is broken", body: "" },
+    { title: "Retry path is broken", body: "   " },
+  ]) {
+    assert.equal(
+      parseReview(
+        JSON.stringify({
+          findings: [
+            {
+              ...blankFinding,
+              confidence_score: 0.9,
+              priority: 1,
+              code_location: {
+                absolute_file_path: "/tmp/retry.js",
+                line_range: { start: 7, end: 7 },
+              },
+            },
+          ],
+          overall_correctness: "patch is incorrect",
+          overall_explanation: "One defect remains.",
+          overall_confidence_score: 0.9,
+        }),
+        "codex",
+      ).status,
+      "invalid",
+    );
+  }
   assert.equal(
     parseReview(
       "Review comment:\n\n- [P2] Preserve retry errors — /tmp/retry.js:4-5\n  The error is discarded.",
@@ -567,6 +598,12 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
       "[features]\nmulti_agent_mode = true",
     ),
     ["features.multi_agent_mode"],
+  );
+  assert.deepEqual(
+    codexRequirementsHazardsFromToml(
+      '[permissions.filesystem]\ndeny_read = ["/tmp/repository/private"]',
+    ),
+    ["permissions.filesystem.deny_read"],
   );
   assert.deepEqual(
     codexManagedHazardsFromToml(
@@ -1381,12 +1418,35 @@ obsolete_external_tool             removed            true
 
 test("isolated Codex feature probing skips user config without losing invocation identity", () => {
   const storage = mkdtempSync(path.join(os.tmpdir(), "review-loop-git-state-"));
+  const authenticatedHome = path.join(storage, "authenticated-codex-home");
+  mkdirSync(authenticatedHome);
+  const authoritativeAuth = path.join(authenticatedHome, "auth.json");
+  writeFileSync(authoritativeAuth, "original credential", { mode: 0o600 });
   const env = {
-    CODEX_HOME: "/authenticated/codex-home-with-malformed-config",
+    CODEX_HOME: authenticatedHome,
     MANAGED_IDENTITY: "cloud-bundle",
   };
   let probeHome;
   try {
+    const sharedIdentityHome = path.join(storage, "shared-identity-home");
+    mkdirSync(sharedIdentityHome);
+    shareCodexIdentityForProbe(
+      {
+        root: "/tmp/repository",
+        isolateCodexConfig: true,
+        codexLegacyProfiles: false,
+      },
+      env,
+      sharedIdentityHome,
+    );
+    const sharedIdentity = path.join(sharedIdentityHome, "auth.json");
+    assert.equal(readFileSync(sharedIdentity, "utf8"), "original credential");
+    writeFileSync(sharedIdentity, "refreshed credential");
+    assert.equal(readFileSync(authoritativeAuth, "utf8"), "refreshed credential");
+    rmSync(sharedIdentityHome, { recursive: true, force: true });
+    assert.equal(readFileSync(authoritativeAuth, "utf8"), "refreshed credential");
+    writeFileSync(authoritativeAuth, "original credential");
+
     const staleHome = path.join(
       storage,
       "codex-feature-inventory-999999999999-abandoned",
@@ -1422,7 +1482,8 @@ test("isolated Codex feature probing skips user config without losing invocation
       },
     );
     assert.deepEqual(disabled, ["codex_hooks", "apps", "multi_agent"]);
-    assert.equal(env.CODEX_HOME, "/authenticated/codex-home-with-malformed-config");
+    assert.equal(env.CODEX_HOME, authenticatedHome);
+    assert.equal(readFileSync(authoritativeAuth, "utf8"), "original credential");
     assert.equal(existsSync(probeHome), false);
     assert.equal(existsSync(staleHome), false);
     assert.equal(existsSync(liveHome), true);
@@ -2267,6 +2328,9 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "  Co-authored-by: Codex",
     "Co-authored-by: GitHub Copilot <copilot@github.com>",
     "Generated-by: automated AI agent <automation@example.test>",
+    "Co-authored-by: Claude Code Agent",
+    "Co-authored-by: Anthropic Claude Code",
+    "Co-authored-by: Amazon Q Developer",
   ]) {
     result = invoke(
       directory,
@@ -2396,6 +2460,8 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "Record review round 2",
     "Codex-assisted retry fix",
     "Reviewed by Codex",
+    "Reviewer feedback prompted this change",
+    "Review feedback led to this change",
   ]) {
     result = invoke(
       directory,
