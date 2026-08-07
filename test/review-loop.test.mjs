@@ -2483,6 +2483,85 @@ setInterval(() => {}, 1000);
   );
 });
 
+test("host signals terminate detached provider trees", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("POSIX process-group regression");
+    return;
+  }
+  const directory = mkdtempSync(path.join(os.tmpdir(), "review-loop-provider-signal-"));
+  const provider = path.join(directory, "provider.mjs");
+  const host = path.join(directory, "host.mjs");
+  const descendantPidFile = path.join(directory, "descendant.pid");
+  let hostChild;
+  let descendantPid;
+  t.after(() => {
+    try {
+      if (hostChild?.pid) process.kill(hostChild.pid, "SIGKILL");
+    } catch (error) {
+      if (error?.code !== "ESRCH") throw error;
+    }
+    try {
+      if (descendantPid) process.kill(descendantPid, "SIGKILL");
+    } catch (error) {
+      if (error?.code !== "ESRCH") throw error;
+    }
+    rmSync(directory, { recursive: true, force: true });
+  });
+  writeFileSync(
+    provider,
+    `import { spawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
+const descendant = spawn(process.execPath, ["-e", "Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0)"], {
+  stdio: "ignore",
+});
+writeFileSync(process.env.DESCENDANT_PID_FILE, String(descendant.pid));
+Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);
+`,
+  );
+  writeFileSync(
+    host,
+    `import { captureProcess } from ${JSON.stringify(pathToFileURL(cli).href)};
+await captureProcess(
+  { command: process.execPath, args: [${JSON.stringify(provider)}] },
+  {
+    cwd: ${JSON.stringify(directory)},
+    env: process.env,
+    timeoutMs: 60_000,
+  },
+);
+`,
+  );
+  hostChild = spawn(process.execPath, [host], {
+    env: { ...process.env, DESCENDANT_PID_FILE: descendantPidFile },
+    stdio: "ignore",
+  });
+  const readyDeadline = Date.now() + 5_000;
+  while (!existsSync(descendantPidFile) && Date.now() < readyDeadline) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+  }
+  assert.equal(existsSync(descendantPidFile), true);
+  descendantPid = Number(readFileSync(descendantPidFile, "utf8"));
+  const exit = once(hostChild, "exit");
+  hostChild.kill("SIGTERM");
+  const [code, signal] = await exit;
+  assert.equal(code, null);
+  assert.equal(signal, "SIGTERM");
+  const cleanupDeadline = Date.now() + 2_000;
+  while (Date.now() < cleanupDeadline) {
+    try {
+      process.kill(descendantPid, 0);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+    } catch (error) {
+      if (error?.code === "ESRCH") break;
+      throw error;
+    }
+  }
+  assert.throws(
+    () => process.kill(descendantPid, 0),
+    (error) => error?.code === "ESRCH",
+  );
+});
+
 test("provider state cleanup runs when capture persistence fails", async (t) => {
   const storage = mkdtempSync(path.join(os.tmpdir(), "review-loop-capture-"));
   t.after(() => rmSync(storage, { recursive: true, force: true }));
@@ -2505,7 +2584,7 @@ test("provider state cleanup runs when capture persistence fails", async (t) => 
   assert.equal(cleanupCalls, 1);
 });
 
-test("review locks serialize overlapping commands and recover dead owners", (t) => {
+test("review locks use portable exclusive creates and recover dead owners", (t) => {
   const { directory } = repositoryFixture(t);
   const gitStorage = git(
     directory,
@@ -2518,6 +2597,7 @@ test("review locks serialize overlapping commands and recover dead owners", (t) 
     : path.resolve(directory, gitStorage);
   const repo = { storage };
   const release = acquireReviewLock(repo);
+  assert.equal(lstatSync(path.join(storage, "review.lock")).isFile(), true);
   assert.throws(
     () => acquireReviewLock(repo),
     /Another review command is already running/u,
@@ -2648,6 +2728,7 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     '- yarn test -- --grep "reject per reviewer feedback"',
     '- python -m pytest -k "reject per reviewer feedback"',
     '- uv run pytest -k "reject per reviewer feedback"',
+    '- $ ./scripts/product-test "reject per reviewer feedback"',
   ]) {
     result = invoke(
       directory,
@@ -2696,6 +2777,8 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "AI fixed this bug",
     "Codex supplied this patch",
     "Claude contributed this implementation",
+    "Preserve retries per Codex",
+    "Preserve retries on reviewer advice",
   ]) {
     result = invoke(
       directory,
@@ -3462,6 +3545,7 @@ test("check-commit-message validates a proposed repair commit", (t) => {
   for (const trailer of [
     "Signed-off-by: Codex",
     "Tested-by: OpenCode",
+    "Tested-by: Claude Coding Assistant",
     "Pair-programmed-with: Claude",
     "Co-authored-by: GPT-5",
     "Co-authored-by : Codex",

@@ -8,7 +8,6 @@ import {
   constants,
   existsSync,
   fstatSync,
-  linkSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -403,44 +402,38 @@ export function acquireReviewLock(repo) {
     token,
     startedAt: new Date().toISOString(),
   };
-  const candidate = `${lockFile}.${process.pid}.${token}.tmp`;
-  writeFileSync(candidate, `${JSON.stringify(owner)}\n`, {
-    encoding: "utf8",
-    mode: 0o600,
-    flag: "wx",
-  });
-  try {
-    for (let attempt = 0; attempt < 2; attempt += 1) {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      writeFileSync(lockFile, `${JSON.stringify(owner)}\n`, {
+        encoding: "utf8",
+        mode: 0o600,
+        flag: "wx",
+      });
+      break;
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      let existing;
       try {
-        linkSync(candidate, lockFile);
-        break;
-      } catch (error) {
-        if (error?.code !== "EEXIST") throw error;
-        let existing;
-        try {
-          existing = JSON.parse(readFileSync(lockFile, "utf8"));
-        } catch (readError) {
-          throw new CliError(
-            `Cannot inspect the existing review lock: ${readError.message}`,
-            5,
-          );
-        }
-        if (
-          attempt === 0 &&
-          Number.isSafeInteger(existing.pid) &&
-          !codexProcessIsRunning(existing.pid)
-        ) {
-          rmSync(lockFile);
-          continue;
-        }
+        existing = JSON.parse(readFileSync(lockFile, "utf8"));
+      } catch (readError) {
         throw new CliError(
-          `Another review command is already running${Number.isSafeInteger(existing.pid) ? ` in process ${existing.pid}` : ""}.`,
+          `Cannot inspect the existing review lock: ${readError.message}`,
           5,
         );
       }
+      if (
+        attempt === 0 &&
+        Number.isSafeInteger(existing.pid) &&
+        !codexProcessIsRunning(existing.pid)
+      ) {
+        rmSync(lockFile);
+        continue;
+      }
+      throw new CliError(
+        `Another review command is already running${Number.isSafeInteger(existing.pid) ? ` in process ${existing.pid}` : ""}.`,
+        5,
+      );
     }
-  } finally {
-    rmSync(candidate, { force: true });
   }
   let released = false;
   return () => {
@@ -3162,6 +3155,7 @@ export function captureProcess(invocation, options) {
     let forcedKind = null;
     let terminating = false;
     let timer;
+    const signalHandlers = new Map();
     let resolveChildExited;
     const childExited = new Promise((resolveExit) => {
       resolveChildExited = resolveExit;
@@ -3176,10 +3170,17 @@ export function captureProcess(invocation, options) {
       windowsHide: true,
     });
 
+    const removeSignalHandlers = () => {
+      for (const [signal, handler] of signalHandlers) {
+        process.removeListener(signal, handler);
+      }
+      signalHandlers.clear();
+    };
     const finish = (value) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      removeSignalHandlers();
       resolve({ ...value, childExited });
     };
     const terminate = () => {
@@ -3201,6 +3202,20 @@ export function captureProcess(invocation, options) {
         }
       }
     };
+    for (const signal of ["SIGHUP", "SIGINT", "SIGTERM"]) {
+      const handler = () => {
+        try {
+          terminate();
+        } finally {
+          removeSignalHandlers();
+          if (process.listenerCount(signal) === 0) {
+            process.kill(process.pid, signal);
+          }
+        }
+      };
+      signalHandlers.set(signal, handler);
+      process.once(signal, handler);
+    }
     const append = (kind, chunk) => {
       if (forcedKind) return;
       capturedBytes += chunk.length;
@@ -3925,6 +3940,14 @@ const WORKFLOW_ATTRIBUTION_PATTERNS = [
   /\b(?:found|identified|reported|flagged|raised|caught|suggested|requested|required)\s+(?:by|during|in|from|through)\s+(?:(?:the|a)\s+)?(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?(?:review|reviewer|feedback|findings?|comments?)|(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu,
   /\b(?:based\s+on|because\s+of|prompted\s+by|in\s+response\s+to)\s+(?:(?:the|a)\s+)?(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?(?:review|reviewer|feedback|findings?|comments?)|(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu,
   /\b(?:according\s+to|in\s+accordance\s+with|due\s+to|owing\s+to|guided\s+by|informed\s+by|derived\s+from)\s+(?:(?:the|a)\s+)?(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?(?:review|reviewer|feedback|findings?|comments?)|(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu,
+  new RegExp(
+    String.raw`\bper\s+(?:(?:the|an?)\s+)?${AI_ATTRIBUTION_IDENTITY_SOURCE}\b(?=[\t ]*(?:\r?\n|$|[.,;:!?)}\]]))`,
+    "iu",
+  ),
+  new RegExp(
+    String.raw`\b(?:on|per)\s+(?:(?:the|an?)\s+)?${AI_ATTRIBUTION_IDENTITY_SOURCE}\s+(?:advice|guidance|recommendations?|requests?|instructions?)\b`,
+    "iu",
+  ),
   /\b(?:changes?|code|implementation|commits?|patch|work)\b.{0,20}\b(?:follow(?:s|ed|ing)?|reflect(?:s|ed|ing)?)\s+(?:(?:the|a)\s+)?(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?(?:review|reviewer|feedback|findings?|comments?)|(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu,
   /\b(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?review(?:er)?\s+)?(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance)\s+(?:prompted|caused|drove|motivated|triggered|led\s+to|resulted\s+in)\s+(?:(?:this|the|these)\s+)?(?:changes?|code|implementation|commits?|patch|work)\b/iu,
   /\bper\s+(?:(?:the|a)\s+(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?(?:review|reviewer|feedback|findings?|comments?)|(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))|(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?review(?:er)?\s+(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu,
@@ -4233,12 +4256,14 @@ function packageManagerRunsTest(executable, commandPrefix) {
 function testSelectorContext(command) {
   let invocation = shellWordAndRest(command.trimStart());
   if (!invocation) return null;
+  let resolvedWord = invocation.word;
   let executable = shellExecutableName(invocation.word);
   let args = invocation.rest;
   let selectorOffset = 0;
   if (["bunx", "npx"].includes(executable)) {
     invocation = shellCommandAfterOptions(args);
     if (!invocation) return null;
+    resolvedWord = invocation.word;
     executable = shellExecutableName(invocation.word);
     args = invocation.rest;
     selectorOffset = command.length - args.length;
@@ -4250,6 +4275,7 @@ function testSelectorContext(command) {
       args.replace(/^(?:dlx|exec)\s+/u, ""),
     );
     if (!invocation) return null;
+    resolvedWord = invocation.word;
     executable = shellExecutableName(invocation.word);
     args = invocation.rest;
     selectorOffset = command.length - args.length;
@@ -4268,6 +4294,7 @@ function testSelectorContext(command) {
       args.replace(/^run\s+(?:--\s+)?/u, ""),
     );
     if (!invocation) return null;
+    resolvedWord = invocation.word;
     executable = shellExecutableName(invocation.word);
     args = invocation.rest;
     selectorOffset = command.length - args.length;
@@ -4340,6 +4367,18 @@ function testSelectorContext(command) {
       );
     }
     default:
+      if (
+        /[\\/]/u.test(resolvedWord) &&
+        /(?:^|[-_.])(?:check|spec|test|tests|verify)(?:$|[-_.])/iu.test(
+          executable,
+        )
+      ) {
+        return {
+          offset: command.length - args.length,
+          options: [],
+          positional: true,
+        };
+      }
       return null;
   }
 }
@@ -4364,17 +4403,26 @@ function commandAttributionProse(text, allowProductTerms) {
   const selectorContext = testSelectorContext(command);
   let withoutSelectors = command;
   if (selectorContext) {
-    const optionSource = selectorContext.options
-      .map(escapeRegularExpression)
-      .join("|");
-    const selector = new RegExp(
-      String.raw`(?<prefix>(?:^|\s)(?:${optionSource})(?:=|\s+))(?<value>"(?:\\.|[^"])*"|'[^']*'|\S+)`,
-      "giu",
-    );
-    const selectable = command.slice(selectorContext.offset).replace(
-      selector,
-      (...args) => `${args.at(-1).prefix}"product test selector"`,
-    );
+    let selectable = command.slice(selectorContext.offset);
+    if (selectorContext.options.length > 0) {
+      const optionSource = selectorContext.options
+        .map(escapeRegularExpression)
+        .join("|");
+      const selector = new RegExp(
+        String.raw`(?<prefix>(?:^|\s)(?:${optionSource})(?:=|\s+))(?<value>"(?:\\.|[^"])*"|'[^']*'|\S+)`,
+        "giu",
+      );
+      selectable = selectable.replace(
+        selector,
+        (...args) => `${args.at(-1).prefix}"product test selector"`,
+      );
+    }
+    if (selectorContext.positional) {
+      selectable = selectable.replace(
+        /"(?:\\.|[^"])*"|'[^']*'/gu,
+        '"product test selector"',
+      );
+    }
     withoutSelectors = `${command.slice(0, selectorContext.offset)}${selectable}`;
   }
   return attributionProse(`${prefix}${withoutSelectors}`, true);
@@ -4632,7 +4680,7 @@ const AI_ATTRIBUTION_IDENTITY = new RegExp(
   "iu",
 );
 const AI_ATTRIBUTION_TRAILER_IDENTITY = new RegExp(
-  String.raw`^(?:(?:automated|generative)\s+)?${AI_ATTRIBUTION_IDENTITY_SOURCE}(?:\s+(?:ai|llm|artificial\s+intelligence|language\s+model|assistant|agent|bot|reviewer|team|tool|cli|code|codex|developer|claude|gemini|chatgpt|gpt(?:-\d+(?:\.\d+)*)?|sonnet|opus|haiku|pro|max|mini|nano|flash|ultra|preview|thinking|coder|\d+(?:\.\d+)*|\d+[a-z][a-z0-9.]*)){0,4}$`,
+  String.raw`^(?:(?:automated|generative)\s+)?${AI_ATTRIBUTION_IDENTITY_SOURCE}(?:\s+(?:ai|llm|artificial\s+intelligence|language\s+model|assistant|agent|bot|reviewer|team|tool|cli|code|coding|codex|developer|claude|gemini|chatgpt|gpt(?:-\d+(?:\.\d+)*)?|sonnet|opus|haiku|pro|max|mini|nano|flash|ultra|preview|thinking|coder|\d+(?:\.\d+)*|\d+[a-z][a-z0-9.]*)){0,4}$`,
   "iu",
 );
 const COMPOSITE_AI_PROVIDER_IDENTITY = new RegExp(
