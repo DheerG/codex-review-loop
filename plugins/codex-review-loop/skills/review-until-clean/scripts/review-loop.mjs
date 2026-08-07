@@ -36,6 +36,7 @@ const MAX_CAPTURE_BYTES = 64 * 1024 * 1024;
 const MAX_CODEX_CONFIG_BYTES = 1024 * 1024;
 const MAX_CODEX_IDENTITY_BYTES = 4 * 1024 * 1024;
 const MAX_CODEX_CLOUD_CACHE_BYTES = 16 * 1024 * 1024;
+const MAX_CODEX_MCP_OVERRIDE_BYTES = 16 * 1024;
 const CODEX_TEMP_HOME_PREFIX = "codex-feature-inventory-";
 const MAX_CODEX_TEMP_HOME_AGE_MS = 25 * 60 * 60 * 1_000;
 const DEFAULT_COMMIT_SECTIONS = ["Failure", "Change", "Verification"];
@@ -722,21 +723,32 @@ function tomlInlineValue(value) {
   throw new CliError("Codex returned an unsupported MCP configuration value.", 3);
 }
 
-export function codexMcpDisableOverride(servers) {
+export function codexMcpDisableOverrides(servers) {
   if (!Array.isArray(servers)) {
     throw new CliError("Codex MCP inventory is not an array.", 3);
   }
-  const disabled = Object.create(null);
+  const names = new Set();
   for (const server of servers) {
     const name = typeof server === "string" ? server : server?.name;
     if (typeof name !== "string" || !name) {
       throw new CliError("Codex MCP inventory contains an unnamed server.", 3);
     }
-    disabled[name] = { enabled: false };
+    names.add(name);
   }
-  return Object.keys(disabled).length > 0
-    ? `mcp_servers=${tomlInlineValue(disabled)}`
-    : null;
+  const overrides = [...names].map(
+    (name) => `mcp_servers.${JSON.stringify(name)}.enabled=false`,
+  );
+  const totalBytes = overrides.reduce(
+    (total, override) => total + Buffer.byteLength(override) + 3,
+    0,
+  );
+  if (totalBytes > MAX_CODEX_MCP_OVERRIDE_BYTES) {
+    throw new CliError(
+      "Codex MCP inventory is too large to disable safely on the command line.",
+      3,
+    );
+  }
+  return overrides;
 }
 
 function codexProjectUntrustedOverride(root) {
@@ -1300,6 +1312,7 @@ export function codexPromptHazardsFromToml(
     "tool_suggest",
   ]);
   const promptRoots = new Set([
+    "experimental_network",
     "shell_environment_policy",
     "skills",
   ]);
@@ -1931,7 +1944,9 @@ export function codexMcpServersForReview(
   env,
   inventory = configuredCodexMcpServers,
 ) {
-  return inventory(state, env);
+  const servers = inventory(state, env);
+  codexMcpDisableOverrides(servers);
+  return servers;
 }
 
 export function codexReviewPreferencesForReview(
@@ -2457,7 +2472,7 @@ export function codexReviewArgs(
   disabledFeatures = CODEX_REVIEW_DISABLED_FEATURES,
   reviewConfig = {},
 ) {
-  const mcpOverride = codexMcpDisableOverride(mcpServers);
+  const mcpOverrides = codexMcpDisableOverrides(mcpServers);
   const preferences = isolateUserConfig
     ? {}
     : (reviewConfig.preferences ?? {});
@@ -2496,7 +2511,7 @@ export function codexReviewArgs(
     'web_search="disabled"',
     "-c",
     "notify=[]",
-    ...(mcpOverride ? ["-c", mcpOverride] : []),
+    ...mcpOverrides.flatMap((override) => ["-c", override]),
     "review",
     "--ephemeral",
     "-",

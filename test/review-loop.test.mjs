@@ -22,7 +22,7 @@ import {
   codexFeaturesForReview,
   codexManagedHazardsFromToml,
   codexManagedConfigPath,
-  codexMcpDisableOverride,
+  codexMcpDisableOverrides,
   codexMcpNamesFromToml,
   codexMcpServersForReview,
   codexPreflightTimeout,
@@ -465,21 +465,24 @@ test("Codex preserves allowlisted preferences and has no default round cap", () 
   assert.equal(reviewRoundLimit("codex", "7"), 7);
 
   const mcpServers = ["__proto__", "docs server", "local"];
-  const mcpOverride = codexMcpDisableOverride(mcpServers);
-  assert.match(mcpOverride, /^mcp_servers=/u);
-  assert.match(mcpOverride, /"docs server"/u);
-  assert.match(mcpOverride, /"__proto__"/u);
-  assert.match(mcpOverride, /"enabled"=false/u);
+  const mcpOverrides = codexMcpDisableOverrides(mcpServers);
+  assert.equal(mcpOverrides.length, 3);
+  assert.match(mcpOverrides[0], /^mcp_servers\./u);
+  assert.match(mcpOverrides.join("\n"), /"docs server"/u);
+  assert.match(mcpOverrides.join("\n"), /"__proto__"/u);
+  assert.match(mcpOverrides.join("\n"), /\.enabled=false/u);
   assert.doesNotMatch(
-    mcpOverride,
+    mcpOverrides.join("\n"),
     /SECRET|sensitive-value|docs\.example\.test|command|url/u,
   );
   const args = codexReviewArgs(false, mcpServers);
-  const overrideIndex = args.indexOf(mcpOverride) - 1;
-  assert.deepEqual(args.slice(overrideIndex, overrideIndex + 2), [
-    "-c",
-    mcpOverride,
-  ]);
+  for (const mcpOverride of mcpOverrides) {
+    const overrideIndex = args.indexOf(mcpOverride) - 1;
+    assert.deepEqual(args.slice(overrideIndex, overrideIndex + 2), [
+      "-c",
+      mcpOverride,
+    ]);
+  }
   assert.deepEqual(
     codexMcpServersForReview(
       { isolateCodexConfig: true },
@@ -495,6 +498,19 @@ test("Codex preserves allowlisted preferences and has no default round cap", () 
         throw new Error("unreadable managed MCP config");
       }),
     /unreadable managed MCP config/u,
+  );
+  const oversizedMcpInventory = Array.from(
+    { length: 256 },
+    (_, index) => `server-${index}-${"x".repeat(80)}`,
+  );
+  assert.throws(
+    () =>
+      codexMcpServersForReview(
+        { isolateCodexConfig: true },
+        {},
+        () => oversizedMcpInventory,
+      ),
+    /too large to disable safely/u,
   );
 });
 
@@ -837,6 +853,12 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
       "skills",
       "tool_suggest",
     ],
+  );
+  assert.deepEqual(
+    codexRequirementsHazardsFromToml(
+      '[experimental_network]\nallowed_domains = ["example.test"]',
+    ),
+    ["experimental_network"],
   );
   assert.deepEqual(
     codexRequirementsHazardsFromToml(`
