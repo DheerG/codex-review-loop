@@ -1755,6 +1755,7 @@ setInterval(() => {}, 1000);
   assert.equal(result.kind, "output_limit");
   assert.match(result.stderr, /exceeded 1024 bytes/u);
   assert.equal(Date.now() - startedAt < 1_000, true);
+  await result.childExited;
 });
 
 test("commit-message rules reject workflow narration", () => {
@@ -2423,6 +2424,8 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "Co-authored-by: Claude 3.5 Sonnet <bot@example.com>",
     "Co-authored-by: github-copilot[bot] <bot@example.com>",
     "Co-authored-by: Codex (OpenAI) <bot@example.com>",
+    "Co-authored-by: claude-code[bot] <bot@example.com>",
+    "Co-authored-by: ChatGPT-4o <bot@example.com>",
   ]) {
     result = invoke(
       directory,
@@ -2556,6 +2559,8 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "Review feedback led to this change",
     "Address GitHub Copilot review feedback",
     "Apply Aider suggestions",
+    "Address Aider's feedback",
+    "Resolve the AI reviewer's findings",
   ]) {
     result = invoke(
       directory,

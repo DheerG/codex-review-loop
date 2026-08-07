@@ -2617,6 +2617,10 @@ export function captureProcess(invocation, options) {
     let forcedKind = null;
     let killTimer;
     let timer;
+    let resolveChildExited;
+    const childExited = new Promise((resolveExit) => {
+      resolveChildExited = resolveExit;
+    });
     const maxCaptureBytes = options.maxCaptureBytes ?? MAX_CAPTURE_BYTES;
     const child = spawn(invocation.command, invocation.args, {
       cwd: options.cwd,
@@ -2630,7 +2634,7 @@ export function captureProcess(invocation, options) {
       settled = true;
       clearTimeout(timer);
       if (!preserveKillTimer) clearTimeout(killTimer);
-      resolve(value);
+      resolve({ ...value, childExited });
     };
     const terminate = () => {
       if (killTimer) return;
@@ -2656,14 +2660,20 @@ export function captureProcess(invocation, options) {
 
     child.stdout.on("data", (chunk) => append("stdout", chunk));
     child.stderr.on("data", (chunk) => append("stderr", chunk));
-    child.on("error", (error) =>
+    child.once("exit", () => {
+      clearTimeout(killTimer);
+      resolveChildExited();
+    });
+    child.on("error", (error) => {
+      clearTimeout(killTimer);
+      resolveChildExited();
       finish({
         ok: false,
         kind: error.code === "ENOENT" ? "unavailable" : "failed",
         stdout,
         stderr: `${stderr}\n${error.message}`,
-      }),
-    );
+      });
+    });
     child.on("close", (code, signal) => {
       if (forcedKind) {
         finish({ ok: false, kind: forcedKind, stdout, stderr });
@@ -2684,6 +2694,16 @@ export function captureProcess(invocation, options) {
     if (invocation.input !== undefined) child.stdin.end(invocation.input);
     else child.stdin.end();
   });
+}
+
+async function cleanupProviderInvocation(invocation, result) {
+  await result?.childExited;
+  try {
+    invocation?.cleanup?.();
+    return null;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
 }
 
 function normalizeProviderOutput(provider, stdout) {
@@ -3093,8 +3113,9 @@ async function reviewCommand(repo, env) {
       env: invocation.env ?? env,
       timeoutMs,
     });
-  } finally {
-    invocation?.cleanup?.();
+  } catch (error) {
+    await cleanupProviderInvocation(invocation, result);
+    throw error;
   }
   const rawFile = roundFile(repo, state, state.round);
   mkdirSync(path.dirname(rawFile), { recursive: true });
@@ -3115,9 +3136,39 @@ async function reviewCommand(repo, env) {
       finishedAt: new Date().toISOString(),
     };
     saveActive(repo, state);
+    const cleanupError = await cleanupProviderInvocation(invocation, result);
+    if (cleanupError) {
+      state.lastReview.cleanupError = cleanupError;
+      saveActive(repo, state);
+    }
     return {
       status: "provider_error",
       kind,
+      round: state.round,
+      outputFile: rawFile,
+      reviewerOutput: result.stdout.trim(),
+      providerError: result.stderr.trim(),
+      ...(cleanupError ? { cleanupError } : {}),
+    };
+  }
+
+  const cleanupError = await cleanupProviderInvocation(invocation, result);
+  if (cleanupError) {
+    state.phase = "provider_error";
+    state.lastReview = {
+      status: "provider_error",
+      kind: "cleanup_failed",
+      cleanupError,
+      round: state.round,
+      snapshot: before,
+      outputFile: rawFile,
+      finishedAt: new Date().toISOString(),
+    };
+    saveActive(repo, state);
+    return {
+      status: "provider_error",
+      kind: "cleanup_failed",
+      cleanupError,
       round: state.round,
       outputFile: rawFile,
       reviewerOutput: result.stdout.trim(),
@@ -3238,7 +3289,7 @@ const PRODUCT_TERM_PATTERNS = [
 
 const WORKFLOW_ATTRIBUTION_PATTERNS = [
   new RegExp(
-    String.raw`\b${WORKFLOW_ACTION_SOURCE}\s+(?:the\s+)?${AI_ATTRIBUTION_IDENTITY_SOURCE}(?:\s+review(?:er)?)?\s+${WORKFLOW_ARTIFACT_SOURCE}\b`,
+    String.raw`\b${WORKFLOW_ACTION_SOURCE}\s+(?:the\s+)?${AI_ATTRIBUTION_IDENTITY_SOURCE}(?:['’]s)?(?:\s+review(?:er)?(?:['’]s)?)?\s+${WORKFLOW_ARTIFACT_SOURCE}\b`,
     "iu",
   ),
   new RegExp(
@@ -3501,7 +3552,7 @@ const AI_ATTRIBUTION_IDENTITY = new RegExp(
   "iu",
 );
 const AI_ATTRIBUTION_TRAILER_IDENTITY = new RegExp(
-  String.raw`^(?:(?:automated|generative)\s+)?${AI_ATTRIBUTION_IDENTITY_SOURCE}(?:\s+(?:assistant|agent|bot|reviewer|tool|cli|code|codex|developer|claude|gemini|chatgpt|gpt(?:-\d+(?:\.\d+)*)?|sonnet|opus|haiku|pro|max|mini|nano|flash|ultra|preview|thinking|coder|\d+(?:\.\d+)*)){0,4}$`,
+  String.raw`^(?:(?:automated|generative)\s+)?${AI_ATTRIBUTION_IDENTITY_SOURCE}(?:\s+(?:assistant|agent|bot|reviewer|tool|cli|code|codex|developer|claude|gemini|chatgpt|gpt(?:-\d+(?:\.\d+)*)?|sonnet|opus|haiku|pro|max|mini|nano|flash|ultra|preview|thinking|coder|\d+(?:\.\d+)*|\d+[a-z][a-z0-9.]*)){0,4}$`,
   "iu",
 );
 const EXPLICIT_AI_AUTHORSHIP_PATTERNS = [
@@ -3549,11 +3600,15 @@ function hasAiAttributionTrailer(message) {
     const displayIdentity = trailer.groups.identity
       .replace(/<[^<>]*>\s*$/u, "")
       .trim();
-    const candidates = [
+    const decoratedCandidates = [
       displayIdentity,
       displayIdentity.replace(/\s*\[(?:bot|ai|agent)\]\s*$/iu, "").trim(),
       displayIdentity.replace(/\s*\([^()]{1,64}\)\s*$/u, "").trim(),
     ];
+    const candidates = decoratedCandidates.flatMap((identity) => [
+      identity,
+      identity.replace(/[-_]+/gu, " "),
+    ]);
     return candidates.some((identity) =>
       AI_ATTRIBUTION_TRAILER_IDENTITY.test(identity),
     );
