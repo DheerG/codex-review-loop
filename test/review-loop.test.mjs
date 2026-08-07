@@ -17,6 +17,7 @@ import { pathToFileURL } from "node:url";
 
 import {
   codexApprovalHazardsFromToml,
+  codexAuthOverridesFromConfigs,
   codexAuthOverridesFromToml,
   codexFeaturesForReview,
   codexManagedHazardsFromToml,
@@ -28,6 +29,7 @@ import {
   codexPromptHazardsFromToml,
   codexReviewArgs,
   codexReviewPreferencesFromToml,
+  codexReviewPreferencesFromConfigs,
   codexRequirementsHazardsFromToml,
   codexRequirementsPath,
   codexSelectedLegacyProfileFromConfigs,
@@ -657,6 +659,19 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
     { model: "gpt-base", model_provider: "openai" },
   );
   assert.deepEqual(
+    codexReviewPreferencesFromConfigs([
+      {
+        contents: 'model = "gpt-system"\nmodel_provider = "private"',
+        file: "system config",
+      },
+      {
+        contents: 'model_provider = "openai"',
+        file: "user config",
+      },
+    ]),
+    { model: "gpt-system", model_provider: "openai" },
+  );
+  assert.deepEqual(
     codexReviewPreferencesFromToml(
       'profile = "work"\n[profiles.work]\nmodel = "gpt-profile"\nmodel_reasoning_effort = "xhigh"',
       "legacy user config",
@@ -698,6 +713,26 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
   assert.deepEqual(
     codexAuthOverridesFromToml('cli_auth_credentials_store = "auto"'),
     ['cli_auth_credentials_store="auto"'],
+  );
+  const layeredAuthConfigs = [
+    {
+      contents:
+        '[profiles.work]\ncli_auth_credentials_store = "keyring"',
+      file: "system config",
+    },
+    { contents: 'profile = "work"', file: "user config" },
+  ];
+  assert.deepEqual(
+    codexAuthOverridesFromConfigs(
+      layeredAuthConfigs,
+      "layered authentication config",
+      {
+        legacyProfiles: true,
+        selectedLegacyProfile:
+          codexSelectedLegacyProfileFromConfigs(layeredAuthConfigs),
+      },
+    ),
+    ['cli_auth_credentials_store="keyring"'],
   );
   assert.throws(
     () =>
@@ -1718,6 +1753,30 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     `${narrativeCommitBody}\n- node --test \\\n${longContinuation}`,
   );
   assert.equal(result.status, 0, result.stderr);
+
+  const longRelativePath = `test/${"review-loop-evidence-".repeat(6)}.test.mjs`;
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
+    "Preserve positional verification evidence",
+    "--body",
+    `${narrativeCommitBody}\n- node --test \\\n  ${longRelativePath}`,
+  );
+  assert.equal(result.status, 0, result.stdout);
+
+  const longPowerShellCommand = `  Write-Output "${"exact PowerShell evidence ".repeat(6).trim()}"`;
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
+    "Preserve PowerShell continuation evidence",
+    "--body",
+    `${narrativeCommitBody}\n- Write-Output "first\`nsecond" \`\n${longPowerShellCommand}`,
+  );
+  assert.equal(result.status, 0, result.stdout);
 
   const windowsVerificationCommands = [
     String.raw`C:\tools\runner.exe --test "${"native windows evidence ".repeat(6).trim()}"`,

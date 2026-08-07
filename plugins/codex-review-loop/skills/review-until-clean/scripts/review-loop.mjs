@@ -586,6 +586,7 @@ function codexAvailability(env, context = undefined) {
         preferenceContext,
         selectedLegacyProfile:
           disabledFeatures.selectedLegacyPreferenceProfile,
+        preferenceConfigs: disabledFeatures.preferenceConfigs,
       },
     );
     return { available: true };
@@ -1180,25 +1181,31 @@ function effectiveCodexRecords(records, options, localSelectedProfile) {
   return [...effective.values()];
 }
 
-export function codexReviewPreferencesFromToml(
-  contents,
-  source = "Codex user config",
-  options = {},
-) {
-  const { records, selectedLegacyProfile } = codexConfigRecords(
-    contents,
-    source,
-  );
+function effectiveCodexRecordsFromConfigs(configs, options = {}) {
+  const effective = new Map();
+  for (const config of configs) {
+    const { records, selectedLegacyProfile } = codexConfigRecords(
+      config.contents,
+      config.file,
+    );
+    for (const record of effectiveCodexRecords(
+      records,
+      options,
+      selectedLegacyProfile,
+    )) {
+      effective.set(JSON.stringify(record.parts), record);
+    }
+  }
+  return [...effective.values()];
+}
+
+function codexReviewPreferencesFromRecords(records, source) {
   const preferences = {};
   let modelProvider;
   let modelCatalog = false;
   let openAiBaseUrl = false;
   const configuredModelProviders = new Set();
-  for (const record of effectiveCodexRecords(
-    records,
-    options,
-    selectedLegacyProfile,
-  )) {
+  for (const record of records) {
     const { parts } = record;
     if (
       parts.length === 1 &&
@@ -1238,6 +1245,32 @@ export function codexReviewPreferencesFromToml(
     }
   }
   return preferences;
+}
+
+export function codexReviewPreferencesFromToml(
+  contents,
+  source = "Codex user config",
+  options = {},
+) {
+  const { records, selectedLegacyProfile } = codexConfigRecords(
+    contents,
+    source,
+  );
+  return codexReviewPreferencesFromRecords(
+    effectiveCodexRecords(records, options, selectedLegacyProfile),
+    source,
+  );
+}
+
+export function codexReviewPreferencesFromConfigs(
+  configs,
+  source = "layered Codex configuration",
+  options = {},
+) {
+  return codexReviewPreferencesFromRecords(
+    effectiveCodexRecordsFromConfigs(configs, options),
+    source,
+  );
 }
 
 export function codexPromptHazardsFromToml(
@@ -1770,19 +1803,9 @@ function configuredCodexMcpServers(state, env) {
   });
 }
 
-export function codexAuthOverridesFromToml(
-  contents,
-  source = "Codex user config",
-  options = {},
-) {
-  const { records, selectedLegacyProfile: localSelectedProfile } =
-    codexConfigRecords(contents, source);
+function codexAuthOverridesFromRecords(records, source) {
   let mode;
-  for (const record of effectiveCodexRecords(
-    records,
-    options,
-    localSelectedProfile,
-  )) {
+  for (const record of records) {
     if (
       record.parts.length === 1 &&
       record.parts[0] === "cli_auth_credentials_store"
@@ -1797,6 +1820,32 @@ export function codexAuthOverridesFromToml(
   throw new CliError(
     `Cannot preserve unsupported Codex authentication storage mode ${JSON.stringify(mode)}.`,
     3,
+  );
+}
+
+export function codexAuthOverridesFromToml(
+  contents,
+  source = "Codex user config",
+  options = {},
+) {
+  const { records, selectedLegacyProfile } = codexConfigRecords(
+    contents,
+    source,
+  );
+  return codexAuthOverridesFromRecords(
+    effectiveCodexRecords(records, options, selectedLegacyProfile),
+    source,
+  );
+}
+
+export function codexAuthOverridesFromConfigs(
+  configs,
+  source = "layered Codex configuration",
+  options = {},
+) {
+  return codexAuthOverridesFromRecords(
+    effectiveCodexRecordsFromConfigs(configs, options),
+    source,
   );
 }
 
@@ -1822,9 +1871,9 @@ function configuredCodexAuthOverrides(state, env) {
   const selectedLegacyProfile = legacyProfiles
     ? codexSelectedLegacyProfileFromConfigs(configs)
     : null;
-  return codexAuthOverridesFromToml(
-    userConfig.contents,
-    userConfig.file,
+  return codexAuthOverridesFromConfigs(
+    configs,
+    "layered Codex authentication configuration",
     { legacyProfiles, selectedLegacyProfile },
   );
 }
@@ -1835,21 +1884,19 @@ function codexReviewPreferenceContext(state, env) {
   if (!userConfig) return null;
   const legacyProfiles = codexUsesLegacyProfiles(state, env);
   const configs = [];
-  if (legacyProfiles) {
-    const systemConfig = codexConfigFile(codexSystemConfig(env));
-    if (systemConfig) configs.push(systemConfig);
-    configs.push(userConfig);
-    for (const managedFile of codexManagedConfigPaths(env)) {
-      const config = codexConfigFile(managedFile);
-      if (config) configs.push(config);
-    }
-    const managedPreference = codexManagedPreference(env);
-    if (managedPreference) {
-      configs.push({
-        contents: managedPreference,
-        file: "managed Codex preferences",
-      });
-    }
+  const systemConfig = codexConfigFile(codexSystemConfig(env));
+  if (systemConfig) configs.push(systemConfig);
+  configs.push(userConfig);
+  for (const managedFile of codexManagedConfigPaths(env)) {
+    const config = codexConfigFile(managedFile);
+    if (config) configs.push(config);
+  }
+  const managedPreference = codexManagedPreference(env);
+  if (managedPreference) {
+    configs.push({
+      contents: managedPreference,
+      file: "managed Codex preferences",
+    });
   }
   return { userConfig, legacyProfiles, configs };
 }
@@ -1866,9 +1913,9 @@ function configuredCodexReviewPreferences(state, env, options = {}) {
     : context.legacyProfiles
       ? codexSelectedLegacyProfileFromConfigs(context.configs)
       : null;
-  return codexReviewPreferencesFromToml(
-    context.userConfig.contents,
-    context.userConfig.file,
+  return codexReviewPreferencesFromConfigs(
+    options.preferenceConfigs ?? context.configs,
+    "layered Codex review configuration",
     { legacyProfiles: context.legacyProfiles, selectedLegacyProfile },
   );
 }
@@ -2218,6 +2265,12 @@ function assertCloudCodexConfigurationSafe(
     ...managedConfigs,
     ...cloudConfigsByPrecedence,
   ];
+  const preferenceConfigs = [
+    ...ordinaryConfigs,
+    ...(userPreferenceConfig ? [userPreferenceConfig] : []),
+    ...managedConfigs,
+    ...cloudConfigsByPrecedence,
+  ];
   const legacyProfiles =
     mergedConfigs.length === 0
       ? false
@@ -2228,12 +2281,7 @@ function assertCloudCodexConfigurationSafe(
     ? codexSelectedLegacyProfileFromConfigs(mergedConfigs)
     : null;
   const selectedLegacyPreferenceProfile = legacyProfiles
-    ? codexSelectedLegacyProfileFromConfigs([
-        ...ordinaryConfigs,
-        ...(userPreferenceConfig ? [userPreferenceConfig] : []),
-        ...managedConfigs,
-        ...cloudConfigsByPrecedence,
-      ])
+    ? codexSelectedLegacyProfileFromConfigs(preferenceConfigs)
     : null;
   const configOptions = { legacyProfiles, selectedLegacyProfile };
   const mcpNames = new Set(reviewOptions.mcpServers ?? []);
@@ -2304,6 +2352,7 @@ function assertCloudCodexConfigurationSafe(
   return {
     selectedLegacyProfile,
     selectedLegacyPreferenceProfile,
+    preferenceConfigs,
     usesReadOnlyDefaultPermissions,
   };
 }
@@ -2367,6 +2416,7 @@ export function codexFeaturesForReview(
       selectedLegacyProfile: configuration.selectedLegacyProfile,
       selectedLegacyPreferenceProfile:
         configuration.selectedLegacyPreferenceProfile,
+      preferenceConfigs: configuration.preferenceConfigs,
       usesReadOnlyDefaultPermissions:
         configuration.usesReadOnlyDefaultPermissions,
       authOverrides,
@@ -2460,6 +2510,7 @@ function providerInvocation(state, prompt, env, repo) {
             preferenceContext,
             selectedLegacyProfile:
               disabledFeatures.selectedLegacyPreferenceProfile,
+            preferenceConfigs: disabledFeatures.preferenceConfigs,
           },
         );
         return {
@@ -3262,10 +3313,12 @@ function isCommandShapedVerification(text) {
   const executable = command.match(
     /^([a-z0-9][A-Za-z0-9_.@+/-]*)(?:\s|$)/u,
   )?.[1];
-  if (!pathCommand && !executable) return false;
+  const powerShellCmdlet =
+    /^[A-Z][A-Za-z0-9]*-[A-Z][A-Za-z0-9]*(?:\s|$)/u.test(command);
+  if (!pathCommand && !executable && !powerShellCmdlet) return false;
   const commonCommand = /^(?:ava|bash|biome|bun|bundle|cargo|claude|cmake|codex|composer|ctest|deno|dotnet|eslint|gemini|gh|git|go|gradle|jest|make|mix|mocha|mvn|node|npm|npx|opencode|php|pip|pip3|pnpm|powershell|prettier|pytest|python|python3|rake|rebar3|ruby|rustc|sh|swift|tsc|uv|vitest|xcodebuild|yarn|zsh)$/u.test(
     executable ?? "",
-  );
+  ) || powerShellCmdlet;
   const explicitSyntax =
     hasEnvironment || pathCommand || hasUnambiguousShellSyntax(text);
   if (!commonCommand && !explicitSyntax) return false;
@@ -3318,7 +3371,7 @@ function verificationEvidenceLines(body, anySection = false) {
 
 function hasShellContinuationMarker(line) {
   const trimmed = line.trimEnd();
-  const backticks = trimmed.match(/`/gu)?.length ?? 0;
+  const trailingBackticks = trimmed.match(/`+$/u)?.[0].length ?? 0;
   const trailingBackslashes = trimmed.match(/\\+$/u)?.[0].length ?? 0;
   const trailingCarets = trimmed.match(/\^+$/u)?.[0].length ?? 0;
   const controlOperator = trimmed.match(/(?:&&|\|\||\|)$/u)?.[0];
@@ -3327,7 +3380,7 @@ function hasShellContinuationMarker(line) {
     : "";
   const controlEscapes = beforeControl.match(/(?:\\|\^)+$/u)?.[0] ?? "";
   return (
-    (trimmed.endsWith("`") && backticks % 2 === 1) ||
+    trailingBackticks % 2 === 1 ||
     trailingBackslashes % 2 === 1 ||
     trailingCarets % 2 === 1 ||
     Boolean(controlOperator && controlEscapes.length % 2 === 0)
@@ -3340,7 +3393,10 @@ function isVerbatimVerificationContinuation(line) {
     !hasWorkflowAttribution(trimmed) &&
     (
       isCommandShapedVerification(trimmed) ||
+      /^[A-Za-z][A-Za-z0-9]*-[A-Za-z][A-Za-z0-9]*(?:\s|$)/u.test(trimmed) ||
       /^--?[A-Za-z0-9][A-Za-z0-9_-]*(?:=|\s|$)/u.test(trimmed) ||
+      /^(?:\.{0,2}[\\/])?[A-Za-z0-9_@+.-]+(?:[\\/][A-Za-z0-9_@+.-]+)+(?:\s|$)/u.test(trimmed) ||
+      /^[A-Za-z0-9_@+-]+\.[A-Za-z0-9_.-]+(?:\s|$)/u.test(trimmed) ||
       /^(?:["'`]|\$\{)/u.test(trimmed)
     )
   );
