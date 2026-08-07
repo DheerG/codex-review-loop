@@ -1653,6 +1653,33 @@ function codexManagedConfigPaths(env) {
   ];
 }
 
+export function preserveCodexHomeManagedConfigForIsolation(
+  localConfigInventory,
+  sourceEnv,
+  temporaryHome,
+  platform = process.platform,
+) {
+  if (platform !== "win32") return false;
+  const source = path.join(codexHome(sourceEnv), "managed_config.toml");
+  const managedConfig = localConfigInventory?.managedConfigs?.find(
+    (config) => path.resolve(config.file) === path.resolve(source),
+  );
+  if (!managedConfig) return false;
+  try {
+    writeFileSync(
+      path.join(temporaryHome, "managed_config.toml"),
+      managedConfig.contents,
+      { encoding: "utf8", mode: 0o600, flag: "wx" },
+    );
+  } catch (error) {
+    throw new CliError(
+      `Cannot preserve Windows home-managed Codex configuration for the isolated reviewer: ${error.message}`,
+      3,
+    );
+  }
+  return true;
+}
+
 function codexManagedPreference(
   env,
   key = "config_toml_base64",
@@ -2439,6 +2466,11 @@ export function codexFeaturesForReview(
   cleanupCodexHome = retainedCodexHomeCleanup(temporaryHome);
   const probeEnv = { ...env, CODEX_HOME: temporaryHome };
   try {
+    preserveCodexHomeManagedConfigForIsolation(
+      options.localConfigInventory,
+      env,
+      temporaryHome,
+    );
     const supported = inventory(state.root, probeEnv);
     const disabled = [...supported.keys()].filter((feature) =>
       codexFeatureRequiresIsolation(feature) &&
@@ -2728,6 +2760,20 @@ async function cleanupProviderInvocation(invocation, result) {
   } catch (error) {
     return error instanceof Error ? error.message : String(error);
   }
+}
+
+export async function persistProviderCapture(rawFile, result, invocation) {
+  let cleanupError;
+  try {
+    mkdirSync(path.dirname(rawFile), { recursive: true });
+    const rawCapture = `${result.stdout ?? ""}${
+      result.stderr ? `\n\n[provider stderr]\n${result.stderr}` : ""
+    }`;
+    writeFileSync(rawFile, rawCapture, { encoding: "utf8", mode: 0o600 });
+  } finally {
+    cleanupError = await cleanupProviderInvocation(invocation, result);
+  }
+  return cleanupError;
 }
 
 function normalizeProviderOutput(provider, stdout) {
@@ -3142,11 +3188,11 @@ async function reviewCommand(repo, env) {
     throw error;
   }
   const rawFile = roundFile(repo, state, state.round);
-  mkdirSync(path.dirname(rawFile), { recursive: true });
-  const rawCapture = `${result.stdout ?? ""}${
-    result.stderr ? `\n\n[provider stderr]\n${result.stderr}` : ""
-  }`;
-  writeFileSync(rawFile, rawCapture, { encoding: "utf8", mode: 0o600 });
+  const cleanupError = await persistProviderCapture(
+    rawFile,
+    result,
+    invocation,
+  );
 
   if (!result.ok) {
     const kind = providerErrorKind(result);
@@ -3158,13 +3204,9 @@ async function reviewCommand(repo, env) {
       snapshot: before,
       outputFile: rawFile,
       finishedAt: new Date().toISOString(),
+      ...(cleanupError ? { cleanupError } : {}),
     };
     saveActive(repo, state);
-    const cleanupError = await cleanupProviderInvocation(invocation, result);
-    if (cleanupError) {
-      state.lastReview.cleanupError = cleanupError;
-      saveActive(repo, state);
-    }
     return {
       status: "provider_error",
       kind,
@@ -3176,7 +3218,6 @@ async function reviewCommand(repo, env) {
     };
   }
 
-  const cleanupError = await cleanupProviderInvocation(invocation, result);
   if (cleanupError) {
     state.phase = "provider_error";
     state.lastReview = {
@@ -3617,9 +3658,10 @@ function hasExplicitAiAuthorship(text, productException = false) {
 }
 
 function hasAiAttributionTrailer(message) {
-  const trailers = message.matchAll(
-    /^[\t ]*(?:[-*]\s+)?[A-Za-z0-9][A-Za-z0-9-]*-(?:by|with)[\t ]*:(?<identity>.*)$/gimu,
-  );
+  const trailers = message.matchAll(new RegExp(
+    String.raw`^[\t ]*(?:[-*]\s+)?(?:[A-Za-z0-9][A-Za-z0-9-]*-(?:by|with)|${AI_AUTHORSHIP_ACTION_SOURCE})[\t ]*:(?<identity>.*)$`,
+    "gimu",
+  ));
   return [...trailers].some((trailer) => {
     const displayIdentity = trailer.groups.identity
       .replace(/<[^<>]*>\s*$/u, "")

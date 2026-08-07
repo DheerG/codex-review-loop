@@ -40,6 +40,8 @@ import {
   parseCodexCloudRequirementsCache,
   parseReview,
   parseCodexFeatureList,
+  persistProviderCapture,
+  preserveCodexHomeManagedConfigForIsolation,
   readBoundedCodexConfig,
   reviewPrompt,
   reviewRoundLimit,
@@ -1632,6 +1634,41 @@ test("isolated Codex feature probing skips user config without losing invocation
   }
 });
 
+test("Windows home-managed policy is preserved inside isolated Codex homes", (t) => {
+  const storage = mkdtempSync(path.join(os.tmpdir(), "review-loop-managed-"));
+  t.after(() => rmSync(storage, { recursive: true, force: true }));
+  const sourceHome = path.join(storage, "source-home");
+  const temporaryHome = path.join(storage, "temporary-home");
+  mkdirSync(sourceHome);
+  mkdirSync(temporaryHome);
+  const source = path.join(sourceHome, "managed_config.toml");
+  const contents = 'default_permissions = ":read-only"\n';
+  writeFileSync(source, contents);
+
+  assert.equal(
+    preserveCodexHomeManagedConfigForIsolation(
+      { managedConfigs: [{ contents, file: source }] },
+      { CODEX_HOME: sourceHome },
+      temporaryHome,
+      "win32",
+    ),
+    true,
+  );
+  assert.equal(
+    readFileSync(path.join(temporaryHome, "managed_config.toml"), "utf8"),
+    contents,
+  );
+  assert.equal(
+    preserveCodexHomeManagedConfigForIsolation(
+      { managedConfigs: [] },
+      { CODEX_HOME: sourceHome },
+      path.join(storage, "unused-home"),
+      "win32",
+    ),
+    false,
+  );
+});
+
 test("retained Codex homes are deleted when the host is interrupted", async (t) => {
   const storage = mkdtempSync(path.join(os.tmpdir(), "review-loop-signal-state-"));
   const fixture = path.join(storage, "retain-home.mjs");
@@ -1816,6 +1853,28 @@ setInterval(() => {}, 1000);
   assert.match(result.stderr, /exceeded 1024 bytes/u);
   assert.equal(Date.now() - startedAt < 1_000, true);
   await result.childExited;
+});
+
+test("provider state cleanup runs when capture persistence fails", async (t) => {
+  const storage = mkdtempSync(path.join(os.tmpdir(), "review-loop-capture-"));
+  t.after(() => rmSync(storage, { recursive: true, force: true }));
+  const blocker = path.join(storage, "not-a-directory");
+  writeFileSync(blocker, "block child paths");
+  let cleanupCalls = 0;
+
+  await assert.rejects(
+    persistProviderCapture(
+      path.join(blocker, "round.txt"),
+      {
+        stdout: "provider output",
+        stderr: "",
+        childExited: Promise.resolve(),
+      },
+      { cleanup: () => { cleanupCalls += 1; } },
+    ),
+    /EEXIST|ENOTDIR|not a directory/iu,
+  );
+  assert.equal(cleanupCalls, 1);
 });
 
 test("commit-message rules reject workflow narration", () => {
@@ -2477,6 +2536,9 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "  Co-authored-by: Codex",
     "Co-authored-by: GitHub Copilot <copilot@github.com>",
     "Generated-by: automated AI agent <automation@example.test>",
+    "Co-authored: Codex",
+    "Reviewed: Codex",
+    "Generated: Claude",
     "Co-authored-by: Claude Code Agent",
     "Co-authored-by: Anthropic Claude Code",
     "Co-authored-by: Amazon Q Developer",
