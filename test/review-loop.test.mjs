@@ -856,6 +856,43 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
     ],
   );
   assert.deepEqual(
+    codexPromptHazardsFromToml(`
+model_context_window = 4096
+model_auto_compact_token_limit = 1024
+model_auto_compact_token_limit_scope = "full"
+tool_output_token_limit = 64
+background_terminal_max_timeout = 1000
+experimental_use_unified_exec_tool = false
+include_permissions_instructions = false
+include_apps_instructions = false
+include_collaboration_mode_instructions = false
+include_environment_context = false
+disabled_tools = ["shell"]
+[tools.update_plan]
+enabled = false
+`),
+    [
+      "background_terminal_max_timeout",
+      "disabled_tools",
+      "experimental_use_unified_exec_tool",
+      "include_apps_instructions",
+      "include_collaboration_mode_instructions",
+      "include_environment_context",
+      "include_permissions_instructions",
+      "model_auto_compact_token_limit",
+      "model_auto_compact_token_limit_scope",
+      "model_context_window",
+      "tool_output_token_limit",
+      "tools",
+    ],
+  );
+  assert.deepEqual(
+    codexPromptHazardsFromToml(
+      '[mcp_servers.readonly]\ndisabled_tools = ["write"]\nenabled_tools = ["read"]',
+    ),
+    [],
+  );
+  assert.deepEqual(
     codexRequirementsHazardsFromToml(
       '[experimental_network]\nallowed_domains = ["example.test"]',
     ),
@@ -1492,6 +1529,29 @@ test("isolated Codex feature probing skips user config without losing invocation
     rmSync(sharedIdentityHome, { recursive: true, force: true });
     assert.equal(readFileSync(authoritativeAuth, "utf8"), "refreshed credential");
     writeFileSync(authoritativeAuth, "original credential");
+
+    const keyringHome = path.join(storage, "keyring-codex-home");
+    const keyringProbeHome = path.join(storage, "keyring-probe-home");
+    mkdirSync(keyringHome);
+    mkdirSync(keyringProbeHome);
+    writeFileSync(
+      path.join(keyringHome, "config.toml"),
+      'cli_auth_credentials_store = "keyring"',
+    );
+    writeFileSync(path.join(keyringHome, "auth.json"), "stale credential");
+    assert.deepEqual(
+      shareCodexIdentityForProbe(
+        {
+          root: "/tmp/repository",
+          isolateCodexConfig: true,
+          codexLegacyProfiles: false,
+        },
+        { ...env, CODEX_HOME: keyringHome },
+        keyringProbeHome,
+      ),
+      ['cli_auth_credentials_store="keyring"'],
+    );
+    assert.equal(existsSync(path.join(keyringProbeHome, "auth.json")), false);
 
     const staleHome = path.join(
       storage,

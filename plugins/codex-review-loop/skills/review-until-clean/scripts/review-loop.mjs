@@ -1298,23 +1298,34 @@ export function codexPromptHazardsFromToml(
   const hazards = new Set();
   const promptKeys = new Set([
     "allow_login_shell",
+    "background_terminal_max_timeout",
     "compact_prompt",
     "developer_instructions",
     "experimental_compact_prompt_file",
     "experimental_instructions_file",
+    "experimental_use_unified_exec_tool",
+    "include_apps_instructions",
+    "include_collaboration_mode_instructions",
+    "include_environment_context",
+    "include_permissions_instructions",
     "instructions",
+    "model_auto_compact_token_limit",
+    "model_auto_compact_token_limit_scope",
     "model_catalog_json",
+    "model_context_window",
     "model_instructions_file",
     "personality",
     "project_doc_fallback_filenames",
     "project_doc_max_bytes",
     "project_root_markers",
+    "tool_output_token_limit",
     "tool_suggest",
   ]);
   const promptRoots = new Set([
     "experimental_network",
     "shell_environment_policy",
     "skills",
+    "tools",
   ]);
   for (const record of effectiveCodexRecords(
     records,
@@ -1323,6 +1334,14 @@ export function codexPromptHazardsFromToml(
   )) {
     const { parts } = record;
     if (parts.length === 1 && promptKeys.has(parts[0])) {
+      hazards.add(parts[0]);
+    } else if (
+      parts.length === 1 &&
+      ["disabled_tools", "enabled_tools"].includes(parts[0])
+    ) {
+      // Preserve forward compatibility with Codex releases that expose
+      // top-level tool filters. MCP-local filters are safe because every MCP
+      // server is independently disabled for review invocations.
       hazards.add(parts[0]);
     } else if (promptRoots.has(parts[0])) {
       hazards.add(parts[0]);
@@ -1871,7 +1890,9 @@ export function codexAuthOverridesFromConfigs(
 function configuredCodexAuthOverrides(state, env) {
   const userConfig = codexConfigFile(path.join(codexHome(env), "config.toml"));
   if (!userConfig) return [];
-  const legacyProfiles = codexUsesLegacyProfiles(state, env);
+  const legacyProfiles = Object.hasOwn(state, "codexLegacyProfiles")
+    ? Boolean(state.codexLegacyProfiles)
+    : codexUsesLegacyProfiles(state, env);
   const configs = [];
   const systemConfig = codexConfigFile(codexSystemConfig(env));
   if (systemConfig) configs.push(systemConfig);
@@ -2015,6 +2036,9 @@ export function codexPreflightTimeout(env) {
 
 export function shareCodexIdentityForProbe(state, sourceEnv, temporaryHome) {
   const authOverrides = configuredCodexAuthOverrides(state, sourceEnv);
+  if (authOverrides.includes('cli_auth_credentials_store="keyring"')) {
+    return authOverrides;
+  }
   const source = path.join(codexHome(sourceEnv), "auth.json");
   if (existsSync(source)) {
     readBoundedCodexRuntimeFile(
