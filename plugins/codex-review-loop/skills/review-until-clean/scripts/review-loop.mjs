@@ -3394,12 +3394,17 @@ const PRODUCT_PROVENANCE_SOURCES = [
 const PRODUCT_PROVENANCE_PATTERNS = PRODUCT_PROVENANCE_SOURCES.map(
   (source) => new RegExp(source, "giu"),
 );
-const PRODUCT_PROVENANCE_CAUSAL_PATTERNS = PRODUCT_PROVENANCE_SOURCES.map(
-  (source) =>
+const PRODUCT_PROVENANCE_CAUSAL_PATTERNS = PRODUCT_PROVENANCE_SOURCES.flatMap(
+  (source) => [
     new RegExp(
       String.raw`\b(?:changes?|code|implementation|commits?|patch)\b.{0,40}(?:\b(?:created|made|produced|generated|authored|written|implemented)\s+)?(?:from|with|using|via|through|based\s+on)\s+${source}`,
       "iu",
     ),
+    new RegExp(
+      String.raw`${source}.{0,40}\b(?:prompted|caused|drove|motivated|triggered|led\s+to|resulted\s+in)\s+(?:(?:this|the|these)\s+)?(?:changes?|code|implementation|commits?|patch|work)\b`,
+      "iu",
+    ),
+  ],
 );
 
 function attributionProse(text, allowProductTerms) {

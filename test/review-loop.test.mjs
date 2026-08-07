@@ -2678,6 +2678,7 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "Codex-assisted retry fix",
     "Reviewed by Codex",
     "Reviewer feedback prompted this change",
+    "Codex-generated feedback prompted this change",
     "Review feedback led to this change",
     "Address GitHub Copilot review feedback",
     "Apply Aider suggestions",
