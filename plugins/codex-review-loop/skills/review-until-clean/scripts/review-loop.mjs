@@ -1230,7 +1230,42 @@ function effectiveCodexRecordsFromConfigs(configs, options = {}) {
   return [...effective.values()];
 }
 
-function codexReviewPreferencesFromRecords(records, source) {
+function codexIsolatedTransportDependencies(records, source) {
+  let modelProvider = "openai";
+  let modelCatalog = false;
+  let openAiBaseUrl = false;
+  const configuredProviders = new Set();
+  for (const record of records) {
+    if (record.parts.length === 1 && record.parts[0] === "model_provider") {
+      modelProvider = tomlStringValue(record.value ?? "", source);
+    } else if (
+      record.parts.length === 1 &&
+      record.parts[0] === "model_catalog_json"
+    ) {
+      modelCatalog = true;
+    } else if (
+      record.parts.length === 1 &&
+      record.parts[0] === "openai_base_url"
+    ) {
+      openAiBaseUrl = true;
+    } else if (record.parts[0] === "model_providers" && record.parts[1]) {
+      configuredProviders.add(record.parts[1]);
+    }
+  }
+  const dependencies = [];
+  if (modelProvider !== "openai") {
+    dependencies.push(`model_provider=${JSON.stringify(modelProvider)}`);
+  } else {
+    if (configuredProviders.has("openai")) {
+      dependencies.push("model_providers.openai");
+    }
+    if (openAiBaseUrl) dependencies.push("openai_base_url");
+  }
+  if (modelCatalog) dependencies.push("model_catalog_json");
+  return dependencies;
+}
+
+function codexReviewPreferencesFromRecords(records, source, options = {}) {
   const preferences = {};
   let modelProvider;
   let modelProviderRecord;
@@ -1285,6 +1320,15 @@ function codexReviewPreferencesFromRecords(records, source) {
     ) {
       dependencies.push("openai_base_url");
     }
+    for (const dependency of options.isolatedTransportDependencies ?? []) {
+      if (
+        modelProvider === "openai" &&
+        dependency.startsWith("model_provider=")
+      ) {
+        continue;
+      }
+      dependencies.push(`isolated profile ${dependency}`);
+    }
     if (dependencies.length > 0) {
       throw new CliError(
         `Cannot safely copy Codex model preferences without dependent user configuration: ${dependencies.join(", ")}. Use --isolate-codex-config or remove the dependent model preference.`,
@@ -1316,9 +1360,32 @@ export function codexReviewPreferencesFromConfigs(
   source = "layered Codex configuration",
   options = {},
 ) {
+  let isolatedTransportDependencies = [];
+  if (
+    options.legacyProfiles &&
+    Object.hasOwn(options, "retainedLegacyProfile") &&
+    options.selectedLegacyProfile !== options.retainedLegacyProfile
+  ) {
+    const retainedConfigs = configs.filter(
+      (config) => config.retainedForReview === true,
+    );
+    const retainedRecords = effectiveCodexRecordsFromConfigs(
+      retainedConfigs,
+      {
+        legacyProfiles: true,
+        selectedLegacyProfile: options.retainedLegacyProfile,
+        retainedLegacyProfile: options.retainedLegacyProfile,
+      },
+    );
+    isolatedTransportDependencies = codexIsolatedTransportDependencies(
+      retainedRecords,
+      `${source} isolated profile`,
+    );
+  }
   return codexReviewPreferencesFromRecords(
     effectiveCodexRecordsFromConfigs(configs, options),
     source,
+    { isolatedTransportDependencies },
   );
 }
 
@@ -1947,27 +2014,37 @@ export function codexAuthOverridesFromConfigs(
   source = "layered Codex configuration",
   options = {},
 ) {
-  return codexAuthOverridesFromRecords(
+  const overrides = codexAuthOverridesFromRecords(
     effectiveCodexRecordsFromConfigs(configs, options),
     source,
   );
+  if (
+    overrides.length === 0 &&
+    options.legacyProfiles &&
+    Object.hasOwn(options, "isolatedLegacyProfile") &&
+    options.selectedLegacyProfile !== options.isolatedLegacyProfile
+  ) {
+    return ['cli_auth_credentials_store="auto"'];
+  }
+  return overrides;
 }
 
 function configuredCodexAuthOverrides(state, env) {
   const configs = [];
   const systemConfig = codexConfigFile(codexSystemConfig(env));
-  if (systemConfig) configs.push(systemConfig);
+  if (systemConfig) configs.push({ ...systemConfig, retainedForReview: true });
   const userConfig = codexConfigFile(path.join(codexHome(env), "config.toml"));
-  if (userConfig) configs.push(userConfig);
+  if (userConfig) configs.push({ ...userConfig, retainedForReview: false });
   for (const managedFile of codexManagedConfigPaths(env)) {
     const config = codexConfigFile(managedFile);
-    if (config) configs.push(config);
+    if (config) configs.push({ ...config, retainedForReview: true });
   }
   const managedPreference = codexManagedPreference(env);
   if (managedPreference) {
     configs.push({
       contents: managedPreference,
       file: "managed Codex preferences",
+      retainedForReview: true,
     });
   }
   if (configs.length === 0) return [];
@@ -1977,10 +2054,15 @@ function configuredCodexAuthOverrides(state, env) {
   const selectedLegacyProfile = legacyProfiles
     ? codexSelectedLegacyProfileFromConfigs(configs)
     : null;
+  const isolatedLegacyProfile = legacyProfiles
+    ? codexSelectedLegacyProfileFromConfigs(
+        configs.filter((config) => config.retainedForReview === true),
+      )
+    : null;
   return codexAuthOverridesFromConfigs(
     configs,
     "layered Codex authentication configuration",
-    { legacyProfiles, selectedLegacyProfile },
+    { legacyProfiles, selectedLegacyProfile, isolatedLegacyProfile },
   );
 }
 
@@ -3808,6 +3890,8 @@ const COMPOSITE_AI_PROVIDER_IDENTITY = new RegExp(
   String.raw`\b(?:codex|gemini|chatgpt|gpt(?:-\d+(?:\.\d+)*)?|openai|anthropic|opencode|(?:github[\s-]+)?copilot|cursor|windsurf|aider|codeium|tabnine|qodo|amazon\s+q|sourcegraph\s+cody)\b`,
   "iu",
 );
+const GENERIC_AI_TRAILER_IDENTITY = /^(?:AI|LLM)\b/u;
+const GENERIC_AI_TRAILER_PHRASE = /^(?:artificial intelligence|language model)\b/iu;
 const EXPLICIT_AI_AUTHORSHIP_PATTERNS = [
   new RegExp(
     String.raw`\b${AI_AUTHORSHIP_ACTION_SOURCE}\b.{0,50}\b(?:by|with|using|via|from)\s+(?:(?:an?|the)\s+)?${AI_ATTRIBUTION_IDENTITY_SOURCE}\b`,
@@ -3885,7 +3969,9 @@ function hasAiAttributionTrailer(message) {
     return candidates.some(
       (identity) =>
         AI_ATTRIBUTION_TRAILER_IDENTITY.test(identity) ||
-        COMPOSITE_AI_PROVIDER_IDENTITY.test(identity),
+        COMPOSITE_AI_PROVIDER_IDENTITY.test(identity) ||
+        GENERIC_AI_TRAILER_IDENTITY.test(identity) ||
+        GENERIC_AI_TRAILER_PHRASE.test(identity),
     );
   });
 }

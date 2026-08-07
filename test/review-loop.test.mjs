@@ -819,6 +819,30 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
     ['cli_auth_credentials_store="keyring"'],
   );
   assert.deepEqual(
+    codexAuthOverridesFromConfigs(
+      [
+        {
+          contents:
+            'profile = "system"\n[profiles.system]\ncli_auth_credentials_store = "keyring"',
+          file: "system config",
+          retainedForReview: true,
+        },
+        {
+          contents: 'profile = "user"',
+          file: "user config",
+          retainedForReview: false,
+        },
+      ],
+      "layered legacy authentication",
+      {
+        legacyProfiles: true,
+        selectedLegacyProfile: "user",
+        isolatedLegacyProfile: "system",
+      },
+    ),
+    ['cli_auth_credentials_store="auto"'],
+  );
+  assert.deepEqual(
     codexAuthOverridesFromConfigs([
       {
         contents: 'cli_auth_credentials_store = "keyring"',
@@ -930,6 +954,32 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
       },
     ),
     { model: "private-review" },
+  );
+  assert.throws(
+    () =>
+      codexReviewPreferencesFromConfigs(
+        [
+          {
+            contents:
+              'profile = "system"\n[profiles.system]\nmodel_provider = "private"\n[model_providers.private]\nbase_url = "https://private.example.test"',
+            file: "system config",
+            retainedForReview: true,
+          },
+          {
+            contents:
+              'profile = "user"\n[profiles.user]\nmodel = "user-model"',
+            file: "user config",
+            retainedForReview: false,
+          },
+        ],
+        "layered legacy transport",
+        {
+          legacyProfiles: true,
+          selectedLegacyProfile: "user",
+          retainedLegacyProfile: "system",
+        },
+      ),
+    /dependent user configuration.*isolated profile model_provider/u,
   );
   assert.deepEqual(
     codexPromptHazardsFromToml(
@@ -2876,6 +2926,8 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "Co-authored-by:\n Codex",
     "Reviewed-by:\n Codex Team <team@example.com>",
     "Helped-by: Claude AI",
+    "Co-authored-by: AI Pair Programmer <bot@example.com>",
+    "Co-authored-by: AI Coding Assistant <bot@example.com>",
   ]) {
     result = invoke(
       directory,
