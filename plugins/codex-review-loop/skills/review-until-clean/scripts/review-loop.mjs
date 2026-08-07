@@ -3431,7 +3431,7 @@ const WORKFLOW_ATTRIBUTION_PATTERNS = [
 ];
 
 const PRODUCT_PROVENANCE_IDENTITY_SOURCE = String.raw`(?:ai|llm|reviewer|codex|claude|gemini|chatgpt|gpt(?:-\d+(?:\.\d+)*)?|openai|anthropic|opencode|(?:github\s+)?copilot)`;
-const PRODUCT_PROVENANCE_ARTIFACT_SOURCE = String.raw`(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance|reviews?|outputs?|results?|reports?|metadata|artifacts?|records?|events?|diagnostics?)`;
+const PRODUCT_PROVENANCE_ARTIFACT_SOURCE = String.raw`(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance|reviews?|responses?|outputs?|results?|reports?|metadata|artifacts?|records?|events?|diagnostics?)`;
 const PRODUCT_PROVENANCE_SOURCE = String.raw`\b${PRODUCT_PROVENANCE_IDENTITY_SOURCE}[\s-]+(?:generated|authored|written|created|produced)\s+(?:review\s+)?${PRODUCT_PROVENANCE_ARTIFACT_SOURCE}\b`;
 const PASSIVE_PRODUCT_PROVENANCE_SOURCE = String.raw`\b${PRODUCT_PROVENANCE_ARTIFACT_SOURCE}\s+(?:generated|authored|written|created|produced)\s+by\s+(?:(?:an?|the)\s+)?${PRODUCT_PROVENANCE_IDENTITY_SOURCE}\b`;
 const PRODUCT_PROVENANCE_SOURCES = [
@@ -3714,6 +3714,14 @@ const EXPLICIT_AI_AUTHORSHIP_PATTERNS = [
 ];
 const CHANGE_AUTHORSHIP_OBJECT_SOURCE = String.raw`(?:changes?|code|implementation|commits?|patch|message|work)`;
 const PRODUCT_EXCEPTION_AI_AUTHORSHIP_PATTERNS = [
+  new RegExp(
+    String.raw`\b${AI_ATTRIBUTION_IDENTITY_SOURCE}\b[\s-]+${AI_AUTHORSHIP_ACTION_SOURCE}\b`,
+    "iu",
+  ),
+  new RegExp(
+    String.raw`\b${AI_AUTHORSHIP_ACTION_SOURCE}\b.{0,50}\b(?:by|with|using|via|from)\s+(?:(?:an?|the)\s+)?${AI_ATTRIBUTION_IDENTITY_SOURCE}\b(?=$|[\t ]*(?:[.,;:!?)}\]]|(?:to|for|while|during|after|before|because|so|and|or|but|which|that|who|when|where)\b))`,
+    "iu",
+  ),
   new RegExp(
     String.raw`\b${CHANGE_AUTHORSHIP_OBJECT_SOURCE}\b.{0,50}\b${AI_AUTHORSHIP_ACTION_SOURCE}\b.{0,50}\b(?:by|with|using|via|from)\s+(?:(?:an?|the)\s+)?${AI_ATTRIBUTION_IDENTITY_SOURCE}\b`,
     "iu",

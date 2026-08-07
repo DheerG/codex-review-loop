@@ -2435,6 +2435,9 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "Claude developed this.",
     "Pair programmed with Claude.",
     "AI helped author these changes.",
+    "AI wrote the parser.",
+    "The parser was written by AI.",
+    "The parser was created using AI.",
   ]) {
     result = invoke(
       directory,
@@ -2492,6 +2495,23 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "all",
     "--product-terms",
     "The repository implements an OpenAI response provider",
+  );
+  assert.equal(result.status, 0, result.stdout);
+
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
+    "Preserve generated provider responses",
+    "--body",
+    "AI-generated responses retain their metadata.",
+    "--policy",
+    "Repository-specific commit format",
+    "--policy-overrides",
+    "all",
+    "--product-terms",
+    "The repository records AI-generated responses as product data",
   );
   assert.equal(result.status, 0, result.stdout);
 
