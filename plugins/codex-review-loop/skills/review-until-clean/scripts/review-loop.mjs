@@ -1206,7 +1206,10 @@ function effectiveCodexRecordsFromConfigs(configs, options = {}) {
       options,
       selectedLegacyProfile,
     )) {
-      effective.set(JSON.stringify(record.parts), record);
+      effective.set(JSON.stringify(record.parts), {
+        ...record,
+        retainedForReview: config.retainedForReview === true,
+      });
     }
   }
   return [...effective.values()];
@@ -1215,9 +1218,10 @@ function effectiveCodexRecordsFromConfigs(configs, options = {}) {
 function codexReviewPreferencesFromRecords(records, source) {
   const preferences = {};
   let modelProvider;
-  let modelCatalog = false;
-  let openAiBaseUrl = false;
-  const configuredModelProviders = new Set();
+  let modelProviderRecord;
+  let modelCatalogRecord;
+  let openAiBaseUrlRecord;
+  const configuredModelProviders = new Map();
   for (const record of records) {
     const { parts } = record;
     if (
@@ -1227,26 +1231,43 @@ function codexReviewPreferencesFromRecords(records, source) {
       preferences[parts[0]] = tomlStringValue(record.value ?? "", source);
     } else if (parts.length === 1 && parts[0] === "model_provider") {
       modelProvider = tomlStringValue(record.value ?? "", source);
+      modelProviderRecord = record;
     } else if (parts.length === 1 && parts[0] === "model_catalog_json") {
-      modelCatalog = true;
+      modelCatalogRecord = record;
     } else if (parts.length === 1 && parts[0] === "openai_base_url") {
-      openAiBaseUrl = true;
+      openAiBaseUrlRecord = record;
     } else if (parts[0] === "model_providers" && parts[1]) {
-      configuredModelProviders.add(parts[1]);
+      configuredModelProviders.set(
+        parts[1],
+        (configuredModelProviders.get(parts[1]) ?? true) &&
+          record.retainedForReview === true,
+      );
     }
   }
   if (preferences.model || preferences.review_model || modelProvider === "openai") {
     const dependencies = [];
     const effectiveModelProvider = modelProvider ?? "openai";
-    if (configuredModelProviders.has(effectiveModelProvider)) {
+    if (configuredModelProviders.get(effectiveModelProvider) === false) {
       dependencies.push(`model_providers.${effectiveModelProvider}`);
-    } else if (modelProvider && modelProvider !== "openai") {
+    } else if (
+      modelProvider &&
+      modelProvider !== "openai" &&
+      modelProviderRecord?.retainedForReview !== true
+    ) {
       dependencies.push(`model_provider=${JSON.stringify(modelProvider)}`);
     }
-    if ((preferences.model || preferences.review_model) && modelCatalog) {
+    if (
+      (preferences.model || preferences.review_model) &&
+      modelCatalogRecord &&
+      modelCatalogRecord.retainedForReview !== true
+    ) {
       dependencies.push("model_catalog_json");
     }
-    if (openAiBaseUrl && effectiveModelProvider === "openai") {
+    if (
+      openAiBaseUrlRecord &&
+      effectiveModelProvider === "openai" &&
+      openAiBaseUrlRecord.retainedForReview !== true
+    ) {
       dependencies.push("openai_base_url");
     }
     if (dependencies.length > 0) {
@@ -1962,17 +1983,20 @@ function codexReviewPreferenceContext(state, env) {
   const legacyProfiles = codexUsesLegacyProfiles(state, env);
   const configs = [];
   const systemConfig = codexConfigFile(codexSystemConfig(env));
-  if (systemConfig) configs.push(systemConfig);
-  configs.push(userConfig);
+  if (systemConfig) {
+    configs.push({ ...systemConfig, retainedForReview: true });
+  }
+  configs.push({ ...userConfig, retainedForReview: false });
   for (const managedFile of codexManagedConfigPaths(env)) {
     const config = codexConfigFile(managedFile);
-    if (config) configs.push(config);
+    if (config) configs.push({ ...config, retainedForReview: true });
   }
   const managedPreference = codexManagedPreference(env);
   if (managedPreference) {
     configs.push({
       contents: managedPreference,
       file: "managed Codex preferences",
+      retainedForReview: true,
     });
   }
   return { userConfig, legacyProfiles, configs };
@@ -2365,10 +2389,21 @@ function assertCloudCodexConfigurationSafe(
     ...cloudConfigsByPrecedence,
   ];
   const preferenceConfigs = [
-    ...ordinaryConfigs,
-    ...(userPreferenceConfig ? [userPreferenceConfig] : []),
-    ...managedConfigs,
-    ...cloudConfigsByPrecedence,
+    ...ordinaryConfigs.map((config) => ({
+      ...config,
+      retainedForReview: true,
+    })),
+    ...(userPreferenceConfig
+      ? [{ ...userPreferenceConfig, retainedForReview: false }]
+      : []),
+    ...managedConfigs.map((config) => ({
+      ...config,
+      retainedForReview: true,
+    })),
+    ...cloudConfigsByPrecedence.map((config) => ({
+      ...config,
+      retainedForReview: true,
+    })),
   ];
   const legacyProfiles =
     mergedConfigs.length === 0

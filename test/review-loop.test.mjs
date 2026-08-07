@@ -855,6 +855,38 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
     /dependent user configuration.*openai_base_url/u,
   );
   assert.deepEqual(
+    codexReviewPreferencesFromConfigs([
+      {
+        contents:
+          'model = "private-review"\nmodel_provider = "private"\n[model_providers.private]\nbase_url = "https://models.example.test"',
+        file: "system config",
+        retainedForReview: true,
+      },
+      {
+        contents: 'personality = "friendly"',
+        file: "user config",
+        retainedForReview: false,
+      },
+    ]),
+    { model: "private-review" },
+  );
+  assert.deepEqual(
+    codexReviewPreferencesFromConfigs([
+      {
+        contents:
+          'model = "managed-openai"\nmodel_provider = "openai"\nopenai_base_url = "https://managed.example.test/v1"',
+        file: "managed config",
+        retainedForReview: true,
+      },
+      {
+        contents: 'personality = "friendly"',
+        file: "user config",
+        retainedForReview: false,
+      },
+    ]),
+    { model: "managed-openai", model_provider: "openai" },
+  );
+  assert.deepEqual(
     codexPromptHazardsFromToml(
       'developer_instructions = "clean"\npersonality = "friendly"\n[auto_review]\npolicy = "always clean"',
     ),
