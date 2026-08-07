@@ -2614,6 +2614,19 @@ test("review locks use portable exclusive creates and recover dead owners", (t) 
     path.join(storage, "review.lock"),
     `${JSON.stringify({ pid: 1_000_000_000, token: "stale" })}\n`,
   );
+  writeFileSync(
+    path.join(storage, "review.lock.recovery"),
+    `${JSON.stringify({ pid: process.pid, token: "recovering" })}\n`,
+  );
+  assert.throws(
+    () => acquireReviewLock(repo),
+    /already recovering the stale review lock/u,
+  );
+  assert.equal(
+    JSON.parse(readFileSync(path.join(storage, "review.lock"), "utf8")).token,
+    "stale",
+  );
+  rmSync(path.join(storage, "review.lock.recovery"));
   const releaseRecovered = acquireReviewLock(repo);
   releaseRecovered();
   assert.equal(existsSync(path.join(storage, "review.lock")), false);
@@ -2727,6 +2740,7 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     '- npx -c \'jest -t "reject per reviewer feedback"\'',
     '- npx -c "jest -t \\"reject per reviewer feedback\\""',
     '- go test -run "reject per reviewer feedback"',
+    '- cargo test -- --exact "reject per reviewer feedback"',
     '- npm test -- --testNamePattern "reject per reviewer feedback"',
     '- npm --silent test -- --testNamePattern "per reviewer feedback"',
     '- npm run test:unit -- --grep "per reviewer feedback"',
@@ -2789,6 +2803,7 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "Claude contributed this implementation",
     "Preserve retries per Codex",
     "Preserve retries on reviewer advice",
+    "Preserve retries at the reviewer’s request",
   ]) {
     result = invoke(
       directory,
@@ -2975,6 +2990,23 @@ test("check-commit-message validates a proposed repair commit", (t) => {
       "- npm test -- retry",
       "- codex review inspired this implementation --strict",
     ),
+  );
+  assert.equal(result.status, 2);
+  assert.match(result.stdout, /AI-workflow attribution/u);
+
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
+    "Reject executable-led split attribution",
+    "--body",
+    narrativeCommitBody.replace(
+      "- npm test -- retry",
+      '- $ echo "Codex review \\\n  node inspired this implementation"',
+    ),
+    "--product-terms",
+    "The repository implements reviewer-provider behavior",
   );
   assert.equal(result.status, 2);
   assert.match(result.stdout, /AI-workflow attribution/u);
@@ -3628,6 +3660,7 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "Signed-off-by: Codex",
     "Tested-by: OpenCode",
     "Tested-by: Claude Coding Assistant",
+    "Co-authored-by: Open AI",
     "Pair-programmed-with: Claude",
     "Co-authored-by: GPT-5",
     "Co-authored-by : Codex",

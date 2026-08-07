@@ -413,8 +413,10 @@ export function acquireReviewLock(repo) {
     } catch (error) {
       if (error?.code !== "EEXIST") throw error;
       let existing;
+      let existingText;
       try {
-        existing = JSON.parse(readFileSync(lockFile, "utf8"));
+        existingText = readFileSync(lockFile, "utf8");
+        existing = JSON.parse(existingText);
       } catch (readError) {
         throw new CliError(
           `Cannot inspect the existing review lock: ${readError.message}`,
@@ -426,8 +428,37 @@ export function acquireReviewLock(repo) {
         Number.isSafeInteger(existing.pid) &&
         !codexProcessIsRunning(existing.pid)
       ) {
-        rmSync(lockFile);
-        continue;
+        const recoveryFile = `${lockFile}.recovery`;
+        try {
+          writeFileSync(recoveryFile, `${JSON.stringify(owner)}\n`, {
+            encoding: "utf8",
+            mode: 0o600,
+            flag: "wx",
+          });
+        } catch (recoveryError) {
+          if (recoveryError?.code !== "EEXIST") throw recoveryError;
+          throw new CliError(
+            "Another review command is already recovering the stale review lock.",
+            5,
+          );
+        }
+        try {
+          if (readFileSync(lockFile, "utf8") !== existingText) {
+            throw new CliError(
+              "The review lock changed while stale recovery was being claimed.",
+              5,
+            );
+          }
+          rmSync(lockFile);
+          writeFileSync(lockFile, `${JSON.stringify(owner)}\n`, {
+            encoding: "utf8",
+            mode: 0o600,
+            flag: "wx",
+          });
+          break;
+        } finally {
+          rmSync(recoveryFile, { force: true });
+        }
       }
       throw new CliError(
         `Another review command is already running${Number.isSafeInteger(existing.pid) ? ` in process ${existing.pid}` : ""}.`,
@@ -3871,7 +3902,7 @@ async function reviewCommandWithLock(repo, env) {
   };
 }
 
-const AI_ATTRIBUTION_IDENTITY_SOURCE = String.raw`(?:ai|artificial intelligence|llm|language model|assistant|agent|bot|reviewer|codex|claude|gemini|chatgpt|gpt(?:-\d+(?:\.\d+)*)?|openai|anthropic|opencode|(?:github[\s-]+)?copilot|cursor|windsurf|aider|devin|codeium|tabnine|qodo|amazon\s+q|sourcegraph\s+cody)`;
+const AI_ATTRIBUTION_IDENTITY_SOURCE = String.raw`(?:ai|artificial intelligence|llm|language model|assistant|agent|bot|reviewer|codex|claude|gemini|chatgpt|gpt(?:-\d+(?:\.\d+)*)?|open[\s-]?ai|anthropic|opencode|(?:github[\s-]+)?copilot|cursor|windsurf|aider|devin|codeium|tabnine|qodo|amazon\s+q|sourcegraph\s+cody)`;
 const WORKFLOW_ACTION_SOURCE = String.raw`(?:address(?:es|ed|ing)?|appl(?:y|ies|ied|ying)|fix(?:es|ed|ing)?|resolv(?:e|es|ed|ing)|handl(?:e|es|ed|ing)|incorporat(?:e|es|ed|ing)|implement(?:s|ed|ing)?|clos(?:e|es|ed|ing)|clear(?:s|ed|ing)?|tackl(?:e|es|ed|ing)|satisf(?:y|ies|ied|ying)|(?:respond|react)(?:s|ed|ing)?\s+to)`;
 const WORKFLOW_ARTIFACT_SOURCE = String.raw`(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance)`;
 
@@ -3948,6 +3979,10 @@ const WORKFLOW_ATTRIBUTION_PATTERNS = [
     String.raw`\b(?:on|per)\s+(?:(?:the|an?)\s+)?${AI_ATTRIBUTION_IDENTITY_SOURCE}\s+(?:advice|guidance|recommendations?|requests?|instructions?)\b`,
     "iu",
   ),
+  new RegExp(
+    String.raw`\b(?:at|by)\s+(?:the\s+)?${AI_ATTRIBUTION_IDENTITY_SOURCE}['’]s\s+(?:advice|guidance|recommendations?|requests?|instructions?|suggestions?)\b`,
+    "iu",
+  ),
   /\b(?:changes?|code|implementation|commits?|patch|work)\b.{0,20}\b(?:follow(?:s|ed|ing)?|reflect(?:s|ed|ing)?)\s+(?:(?:the|a)\s+)?(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?(?:review|reviewer|feedback|findings?|comments?)|(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu,
   /\b(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?review(?:er)?\s+)?(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance)\s+(?:prompted|caused|drove|motivated|triggered|led\s+to|resulted\s+in)\s+(?:(?:this|the|these)\s+)?(?:changes?|code|implementation|commits?|patch|work)\b/iu,
   /\bper\s+(?:(?:the|a)\s+(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?(?:review|reviewer|feedback|findings?|comments?)|(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))|(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?review(?:er)?\s+(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu,
@@ -3963,7 +3998,7 @@ const WORKFLOW_ATTRIBUTION_PATTERNS = [
   /\breview(?:er)?[ -]?round\s*#?\d+\b/iu,
 ];
 
-const PRODUCT_PROVENANCE_IDENTITY_SOURCE = String.raw`(?:ai|llm|reviewer|codex|claude|gemini|chatgpt|gpt(?:-\d+(?:\.\d+)*)?|openai|anthropic|opencode|(?:github\s+)?copilot)`;
+const PRODUCT_PROVENANCE_IDENTITY_SOURCE = String.raw`(?:ai|llm|reviewer|codex|claude|gemini|chatgpt|gpt(?:-\d+(?:\.\d+)*)?|open[\s-]?ai|anthropic|opencode|(?:github\s+)?copilot)`;
 const PRODUCT_PROVENANCE_ARTIFACT_SOURCE = String.raw`(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance|reviews?|responses?|outputs?|results?|reports?|metadata|artifacts?|records?|events?|diagnostics?)`;
 const PRODUCT_PROVENANCE_SOURCE = String.raw`\b${PRODUCT_PROVENANCE_IDENTITY_SOURCE}[\s-]+(?:generated|authored|written|created|produced)\s+(?:review\s+)?${PRODUCT_PROVENANCE_ARTIFACT_SOURCE}\b`;
 const PASSIVE_PRODUCT_PROVENANCE_SOURCE = String.raw`\b${PRODUCT_PROVENANCE_ARTIFACT_SOURCE}\s+(?:generated|authored|written|created|produced)\s+by\s+(?:(?:an?|the)\s+)?${PRODUCT_PROVENANCE_IDENTITY_SOURCE}\b`;
@@ -4372,6 +4407,10 @@ function testSelectorContext(command) {
       return /^test(?:\s|$)/u.test(args)
         ? context(["-t", "--test-name-pattern"])
         : null;
+    case "cargo":
+      return /^test(?:\s|$)/u.test(args)
+        ? context(["--exact", "--skip"])
+        : null;
     case "dotnet":
       return /^test(?:\s|$)/u.test(args)
         ? context(["--filter"])
@@ -4633,26 +4672,12 @@ function verificationEvidenceLines(
       continue;
     }
     const acceptsEvidence = anySection || section === "Verification";
-    if (
-      acceptsEvidence &&
-      isVerbatimVerificationCommand(line, allowProductTerms)
-    ) {
-      evidence.add(index);
-      commandContinues = hasShellContinuationMarker(line);
-      continuedCommand = commandContinues
-        ? verbatimVerificationCommandText(line)
-        : "";
-      continuedEvidence = commandContinues ? [index] : [];
-    } else if (isCommitSectionBoundary(line)) {
-      discardContinuedEvidence();
-      section = null;
-      commandContinues = false;
-      continuedCommand = "";
-      continuedEvidence = [];
+    const boundary = isCommitSectionBoundary(line);
+    if (!acceptsEvidence) {
+      if (boundary) section = null;
       continue;
-    } else if (!acceptsEvidence) {
-      continue;
-    } else if (commandContinues && /^\s+\S/u.test(line)) {
+    }
+    if (commandContinues && /^\s+\S/u.test(line) && !boundary) {
       if (
         isVerbatimVerificationContinuation(
           line,
@@ -4674,11 +4699,22 @@ function verificationEvidenceLines(
         commandContinues = false;
         continuedCommand = "";
       }
-    } else {
-      if (commandContinues) discardContinuedEvidence();
+      continue;
+    }
+    if (commandContinues) {
+      discardContinuedEvidence();
       commandContinues = false;
       continuedCommand = "";
-      continuedEvidence = [];
+    }
+    if (isVerbatimVerificationCommand(line, allowProductTerms)) {
+      evidence.add(index);
+      commandContinues = hasShellContinuationMarker(line);
+      continuedCommand = commandContinues
+        ? verbatimVerificationCommandText(line)
+        : "";
+      continuedEvidence = commandContinues ? [index] : [];
+    } else if (boundary) {
+      section = null;
     }
   }
   if (commandContinues) discardContinuedEvidence();
@@ -4773,7 +4809,7 @@ const AI_ATTRIBUTION_TRAILER_IDENTITY = new RegExp(
   "iu",
 );
 const COMPOSITE_AI_PROVIDER_IDENTITY = new RegExp(
-  String.raw`\b(?:codex|gemini|chatgpt|gpt(?:-\d+(?:\.\d+)*)?|openai|anthropic|opencode|(?:github[\s-]+)?copilot|cursor|windsurf|aider|codeium|tabnine|qodo|amazon\s+q|sourcegraph\s+cody)\b`,
+  String.raw`\b(?:codex|gemini|chatgpt|gpt(?:-\d+(?:\.\d+)*)?|open[\s-]?ai|anthropic|opencode|(?:github[\s-]+)?copilot|cursor|windsurf|aider|codeium|tabnine|qodo|amazon\s+q|sourcegraph\s+cody)\b`,
   "iu",
 );
 const GENERIC_AI_TRAILER_IDENTITY = /^(?:AI|LLM)\b/iu;
