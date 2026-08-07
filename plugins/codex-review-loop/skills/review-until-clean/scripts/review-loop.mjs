@@ -4221,11 +4221,16 @@ function npxCommandValue(command) {
   if (!match) return null;
   const parsed = shellWordAndRest(match.groups.value);
   if (!parsed || parsed.rest) return null;
+  const nestedCommand = match.groups.value.startsWith('"')
+    ? parsed.word
+      .replace(/\\\r?\n/gu, "")
+      .replace(/\\(["\\$`])/gu, "$1")
+    : parsed.word;
   const argsOffset = command.length - invocation.rest.length;
   const valueOffset = match[0].indexOf(match.groups.value);
   const start = argsOffset + match.index + valueOffset;
   return {
-    command: parsed.word,
+    command: nestedCommand,
     end: start + match.groups.value.length,
     start,
   };
@@ -4432,7 +4437,7 @@ function commandAttributionProse(text, allowProductTerms) {
       allowProductTerms,
     );
     const expanded = `${command.slice(0, nestedCommand.start)} ${nestedProse} ${command.slice(nestedCommand.end)}`;
-    return attributionProse(`${prefix}${expanded}`, true);
+    return `${prefix}${expanded}`;
   }
   const selectorContext = testSelectorContext(command);
   let withoutSelectors = command;
@@ -4459,11 +4464,20 @@ function commandAttributionProse(text, allowProductTerms) {
     }
     withoutSelectors = `${command.slice(0, selectorContext.offset)}${selectable}`;
   }
-  return attributionProse(`${prefix}${withoutSelectors}`, true);
+  return `${prefix}${withoutSelectors}`;
 }
 
 function hasNonWaivableCommandAttribution(text, allowProductTerms) {
-  const prose = commandAttributionProse(text, allowProductTerms);
+  const commandProse = commandAttributionProse(text, allowProductTerms);
+  if (
+    allowProductTerms &&
+    PRODUCT_PROVENANCE_CAUSAL_PATTERNS.some((pattern) =>
+      pattern.test(commandProse),
+    )
+  ) {
+    return true;
+  }
+  const prose = attributionProse(commandProse, allowProductTerms);
   return (
     DIRECT_AI_FIX_ATTRIBUTION_PATTERNS.some((pattern) => pattern.test(prose)) ||
     PRODUCT_WORKFLOW_CAUSAL_PATTERNS.some((pattern) => pattern.test(prose)) ||
@@ -4666,24 +4680,13 @@ function isVerbatimVerificationContinuation(
   commandContext = "",
 ) {
   const trimmed = line.trim();
-  const option = /^--?[A-Za-z0-9][A-Za-z0-9_-]*(?:=|\s|$)/u.test(trimmed);
-  const operator = /^(?:&&|\|\||\||(?:\d*|&)?(?:>>?|<<?|<>|>\|))\s*\S/u.test(
-    trimmed,
-  );
+  if (!trimmed) return false;
   const attributionText = commandContext
     ? `${commandContext}\n${trimmed}`
     : trimmed;
   return (
     !hasNonWaivableCommandAttribution(attributionText, allowProductTerms) &&
-    (
-      isCommandShapedVerification(trimmed, allowProductTerms) ||
-      /^[A-Za-z][A-Za-z0-9]*-[A-Za-z][A-Za-z0-9]*(?:\s|$)/u.test(trimmed) ||
-      operator ||
-      option ||
-      /^(?:\.{0,2}[\\/])?[A-Za-z0-9_@+.-]+(?:[\\/][A-Za-z0-9_@+.-]+)+(?:\s|$)/u.test(trimmed) ||
-      /^[A-Za-z0-9_@+-]+\.[A-Za-z0-9_.-]+(?:\s|$)/u.test(trimmed) ||
-      /^(?:["'`]|\$\{)/u.test(trimmed)
-    )
+    !hasAttributedShellComment(trimmed)
   );
 }
 

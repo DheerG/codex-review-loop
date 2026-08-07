@@ -2720,6 +2720,7 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     '- npx --yes jest -t "reject per reviewer feedback"',
     '- npx -p jest jest -t "reject per reviewer feedback"',
     '- npx -c \'jest -t "reject per reviewer feedback"\'',
+    '- npx -c "jest -t \\"reject per reviewer feedback\\""',
     '- go test -run "reject per reviewer feedback"',
     '- npm test -- --testNamePattern "reject per reviewer feedback"',
     '- npm --silent test -- --testNamePattern "per reviewer feedback"',
@@ -2902,6 +2903,7 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "- codex requested this change",
     "- claude suggested this patch",
     '- $ echo "Reviewed by Codex"',
+    '- $ echo "Changes address AI-generated findings"',
     "- $ echo Addressed Codex review feedback",
     '- `echo "Reviewed by Codex"`',
     "- `npm test`\n  --message=Reviewed by Codex",
@@ -3056,6 +3058,18 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     );
     assert.equal(result.status, 0, `${operatorContinuation}\n${result.stdout}`);
   }
+
+  const longBareContinuation = `  grep "${"arbitrary continued verification evidence ".repeat(5).trim()}"`;
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
+    "Preserve arbitrary command continuations",
+    "--body",
+    `${narrativeCommitBody}\n- npm test |\n${longBareContinuation}`,
+  );
+  assert.equal(result.status, 0, result.stdout);
 
   const longEnvironmentContinuation = `  BAR="${"preserve environment continuation ".repeat(5).trim()}" \\`;
   result = invoke(
