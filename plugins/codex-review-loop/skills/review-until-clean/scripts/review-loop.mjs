@@ -1889,10 +1889,10 @@ export function codexApprovalHazardsFromToml(
         hazards.add("approvals_reviewer");
       }
     } else if (
-      parts[0] === "permission_profile" &&
+      ["default_permissions", "permission_profile"].includes(parts[0]) &&
       tomlStringValue(record.value ?? "", source) !== ":read-only"
     ) {
-      hazards.add("permission_profile");
+      hazards.add(parts[0]);
     }
   }
   return [...hazards].sort();
@@ -4004,19 +4004,26 @@ function attributionProse(text, allowProductTerms) {
 }
 
 function hasAttribution(text, allowProductTerms) {
+  const normalizedText = normalizeShellContinuations(text);
   if (
-    DIRECT_AI_FIX_ATTRIBUTION_PATTERNS.some((pattern) => pattern.test(text)) ||
-    PRODUCT_WORKFLOW_CAUSAL_PATTERNS.some((pattern) => pattern.test(text))
+    DIRECT_AI_FIX_ATTRIBUTION_PATTERNS.some((pattern) =>
+      pattern.test(normalizedText),
+    ) ||
+    PRODUCT_WORKFLOW_CAUSAL_PATTERNS.some((pattern) =>
+      pattern.test(normalizedText),
+    )
   ) {
     return true;
   }
   if (
     allowProductTerms &&
-    PRODUCT_PROVENANCE_CAUSAL_PATTERNS.some((pattern) => pattern.test(text))
+    PRODUCT_PROVENANCE_CAUSAL_PATTERNS.some((pattern) =>
+      pattern.test(normalizedText),
+    )
   ) {
     return true;
   }
-  const prose = attributionProse(text, allowProductTerms);
+  const prose = attributionProse(normalizedText, allowProductTerms);
   if (
     hasExplicitAiAuthorship(prose, allowProductTerms) ||
     WORKFLOW_ATTRIBUTION_PATTERNS.some((pattern) => pattern.test(prose))
@@ -4025,7 +4032,7 @@ function hasAttribution(text, allowProductTerms) {
   }
   return (
     !allowProductTerms &&
-    PRODUCT_TERM_PATTERNS.some((pattern) => pattern.test(text))
+    PRODUCT_TERM_PATTERNS.some((pattern) => pattern.test(normalizedText))
   );
 }
 
@@ -4270,7 +4277,7 @@ function packageManagerRunsTest(executable, commandPrefix) {
   const command = words[index];
   if (command === "test" && index === words.length - 1) return true;
   if (
-    command === "run" &&
+    ["run", "run-script"].includes(command) &&
     /^test(?::[A-Za-z0-9_.-]+)?$/u.test(words[index + 1] ?? "") &&
     index + 2 === words.length
   ) {
@@ -4593,6 +4600,7 @@ function verificationEvidenceLines(
   let section = null;
   let commandContinues = false;
   let continuedCommand = "";
+  let continuedEvidence = [];
   const lines = body.split(/\r?\n/u);
   for (const [index, line] of lines.entries()) {
     const heading = line.trim().match(
@@ -4602,6 +4610,7 @@ function verificationEvidenceLines(
       section = heading[1];
       commandContinues = false;
       continuedCommand = "";
+      continuedEvidence = [];
       continue;
     }
     const acceptsEvidence = anySection || section === "Verification";
@@ -4614,30 +4623,44 @@ function verificationEvidenceLines(
       continuedCommand = commandContinues
         ? verbatimVerificationCommandText(line)
         : "";
+      continuedEvidence = commandContinues ? [index] : [];
     } else if (isCommitSectionBoundary(line)) {
       section = null;
       commandContinues = false;
       continuedCommand = "";
+      continuedEvidence = [];
       continue;
     } else if (!acceptsEvidence) {
       continue;
-    } else if (
-      commandContinues &&
-      /^\s+\S/u.test(line) &&
-      isVerbatimVerificationContinuation(
-        line,
-        allowProductTerms,
-        continuedCommand,
-      )
-    ) {
-      evidence.add(index);
-      commandContinues = hasShellContinuationMarker(line);
-      continuedCommand = commandContinues
-        ? `${continuedCommand}\n${line.trim()}`
-        : "";
+    } else if (commandContinues && /^\s+\S/u.test(line)) {
+      if (
+        isVerbatimVerificationContinuation(
+          line,
+          allowProductTerms,
+          continuedCommand,
+        )
+      ) {
+        evidence.add(index);
+        commandContinues = hasShellContinuationMarker(line);
+        if (commandContinues) {
+          continuedEvidence.push(index);
+          continuedCommand = `${continuedCommand}\n${line.trim()}`;
+        } else {
+          continuedEvidence = [];
+          continuedCommand = "";
+        }
+      } else {
+        for (const evidenceIndex of continuedEvidence) {
+          evidence.delete(evidenceIndex);
+        }
+        commandContinues = false;
+        continuedCommand = "";
+        continuedEvidence = [];
+      }
     } else {
       commandContinues = false;
       continuedCommand = "";
+      continuedEvidence = [];
     }
   }
   return evidence;
@@ -4674,6 +4697,12 @@ function hasShellContinuationMarker(line) {
   );
 }
 
+function normalizeShellContinuations(text) {
+  return text
+    .replace(/(?:\\|\^|`)\r?\n[\t ]*/gu, "")
+    .replace(/(&&|\|\||\|)\r?\n[\t ]*/gu, "$1 ");
+}
+
 function isVerbatimVerificationContinuation(
   line,
   allowProductTerms = false,
@@ -4682,7 +4711,7 @@ function isVerbatimVerificationContinuation(
   const trimmed = line.trim();
   if (!trimmed) return false;
   const attributionText = commandContext
-    ? `${commandContext}\n${trimmed}`
+    ? normalizeShellContinuations(`${commandContext}\n${trimmed}`)
     : trimmed;
   return (
     !hasNonWaivableCommandAttribution(attributionText, allowProductTerms) &&

@@ -740,6 +740,18 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
     ),
     [],
   );
+  assert.deepEqual(
+    codexApprovalHazardsFromToml('default_permissions = ":read-only"'),
+    [],
+  );
+  assert.deepEqual(
+    codexApprovalHazardsFromToml('default_permissions = ":workspace"'),
+    ["default_permissions"],
+  );
+  assert.deepEqual(
+    codexApprovalHazardsFromToml('default_permissions = "custom"'),
+    ["default_permissions"],
+  );
 
   const selectedLegacyProfile = codexSelectedLegacyProfileFromToml(
     'profile = "work"',
@@ -1860,53 +1872,46 @@ obsolete_external_tool             removed            true
     /MCP inventory is too large to disable safely/u,
   );
 
-  const cloudSelectedPermissionFeatures = codexFeaturesForReview(
-    {
-      root: "/tmp/repository",
-      isolateCodexConfig: true,
-      codexLegacyProfiles: true,
-    },
-    {},
-    undefined,
-    (_root, _env, requested = []) =>
-      new Map([
-        ["hooks", !requested.includes("hooks")],
-        ["shell_tool", true],
-      ]),
-    () => ({
-      managedConfigs: [
+  assert.throws(
+    () =>
+      codexFeaturesForReview(
         {
-          contents: 'profile = "danger"',
-          file: "cloud-managed Codex config (profile selection)",
+          root: "/tmp/repository",
+          isolateCodexConfig: true,
+          codexLegacyProfiles: true,
         },
-      ],
-      requirementsConfigs: [],
-    }),
-    {
-      localConfigInventory: {
-        ordinaryConfigs: [
-          {
-            contents:
-              'profile = "safe"\n[profiles.safe]\ndefault_permissions = ":read-only"\n[profiles.danger]\ndefault_permissions = "workspace-write"',
-            file: "system config",
+        {},
+        undefined,
+        (_root, _env, requested = []) =>
+          new Map([
+            ["hooks", !requested.includes("hooks")],
+            ["shell_tool", true],
+          ]),
+        () => ({
+          managedConfigs: [
+            {
+              contents: 'profile = "danger"',
+              file: "cloud-managed Codex config (profile selection)",
+            },
+          ],
+          requirementsConfigs: [],
+        }),
+        {
+          localConfigInventory: {
+            ordinaryConfigs: [
+              {
+                contents:
+                  'profile = "safe"\n[profiles.safe]\ndefault_permissions = ":read-only"\n[profiles.danger]\ndefault_permissions = "workspace-write"',
+                file: "system config",
+              },
+            ],
+            managedConfigs: [],
+            requirementsConfigs: [],
           },
-        ],
-        managedConfigs: [],
-        requirementsConfigs: [],
-      },
-      mcpServers: [],
-    },
-  );
-  assert.equal(
-    cloudSelectedPermissionFeatures.usesReadOnlyDefaultPermissions,
-    false,
-  );
-  assert.equal(
-    codexReviewArgs(false, [], cloudSelectedPermissionFeatures, {
-      usesReadOnlyDefaultPermissions:
-        cloudSelectedPermissionFeatures.usesReadOnlyDefaultPermissions,
-    }).includes("--sandbox"),
-    true,
+          mcpServers: [],
+        },
+      ),
+    /system config: default_permissions/u,
   );
 
   const userIgnoredMcpServers = [];
@@ -2725,6 +2730,7 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     '- npm test -- --testNamePattern "reject per reviewer feedback"',
     '- npm --silent test -- --testNamePattern "per reviewer feedback"',
     '- npm run test:unit -- --grep "per reviewer feedback"',
+    '- npm run-script test -- --grep "per reviewer feedback"',
     '- pnpm test -- --test-name-pattern "reject per reviewer feedback"',
     '- pnpm --filter workspace test -- --grep "per reviewer feedback"',
     '- yarn test -- --grep "reject per reviewer feedback"',
@@ -3070,6 +3076,23 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     `${narrativeCommitBody}\n- npm test |\n${longBareContinuation}`,
   );
   assert.equal(result.status, 0, result.stdout);
+
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
+    "Reject split workflow attribution",
+    "--body",
+    narrativeCommitBody.replace(
+      "- npm test -- retry",
+      '- $ echo "Codex review \\\n  inspired this implementation"',
+    ),
+    "--product-terms",
+    "The repository implements reviewer-provider behavior",
+  );
+  assert.equal(result.status, 2);
+  assert.match(result.stdout, /AI-workflow attribution/u);
 
   const longEnvironmentContinuation = `  BAR="${"preserve environment continuation ".repeat(5).trim()}" \\`;
   result = invoke(
