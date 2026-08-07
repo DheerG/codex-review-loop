@@ -1656,6 +1656,7 @@ export function codexPromptHazardsFromToml(
     "model_catalog_json",
     "model_context_window",
     "model_instructions_file",
+    "model_verbosity",
     "personality",
     "project_doc_fallback_filenames",
     "project_doc_max_bytes",
@@ -3223,10 +3224,17 @@ function parseCodexStructuredReview(text) {
   } catch {
     return null;
   }
+  const expectedKeys = [
+    "findings",
+    "overall_confidence_score",
+    "overall_correctness",
+    "overall_explanation",
+  ];
   if (
     !value ||
     typeof value !== "object" ||
     !Array.isArray(value.findings) ||
+    JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(expectedKeys) ||
     typeof value.overall_explanation !== "string" ||
     !value.overall_explanation.trim() ||
     typeof value.overall_confidence_score !== "number" ||
@@ -3732,6 +3740,19 @@ const PRODUCT_TERM_PATTERNS = [
   /\b(?:after|during|from|following)\s+(?:(?:the|a)\s+)?(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?(?:review|reviewer)\b/iu,
   /\b(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+(?:found|identified|reported|flagged|raised|caught|suggested|requested|required)\b/iu,
 ];
+const PRODUCT_WORKFLOW_SOURCE = String.raw`(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?review(?:er)?|(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance))`;
+const PRODUCT_WORKFLOW_CAUSAL_ACTION = String.raw`(?:inspir(?:e|es|ed|ing)|influenc(?:e|es|ed|ing)|shap(?:e|es|ed|ing)|inform(?:s|ed|ing)?|guid(?:e|es|ed|ing)|prompt(?:s|ed|ing)?|caus(?:e|es|ed|ing)|motiv(?:ate|ates|ated|ating)|trigger(?:s|ed|ing)?|driv(?:e|es|en|ing)|drove|lead(?:s|ing)?\s+to|led\s+to|result(?:s|ed|ing)?\s+in)`;
+const PRODUCT_WORKFLOW_CHANGE = String.raw`(?:this|the|these|those)?\s*(?:changes?|code|implementation|commits?|patch|work|fix(?:es)?)`;
+const PRODUCT_WORKFLOW_CAUSAL_PATTERNS = [
+  new RegExp(
+    String.raw`\b${PRODUCT_WORKFLOW_SOURCE}\b.{0,60}\b${PRODUCT_WORKFLOW_CAUSAL_ACTION}\b.{0,40}\b${PRODUCT_WORKFLOW_CHANGE}\b`,
+    "iu",
+  ),
+  new RegExp(
+    String.raw`\b${PRODUCT_WORKFLOW_CHANGE}\b.{0,60}\b(?:was|were|is|are|has\s+been|have\s+been)?\s*${PRODUCT_WORKFLOW_CAUSAL_ACTION}\b.{0,40}\b(?:by|from|through)?\s*${PRODUCT_WORKFLOW_SOURCE}\b`,
+    "iu",
+  ),
+];
 
 const WORKFLOW_ATTRIBUTION_PATTERNS = [
   new RegExp(
@@ -3812,6 +3833,11 @@ function attributionProse(text, allowProductTerms) {
 }
 
 function hasAttribution(text, allowProductTerms) {
+  if (
+    PRODUCT_WORKFLOW_CAUSAL_PATTERNS.some((pattern) => pattern.test(text))
+  ) {
+    return true;
+  }
   if (
     allowProductTerms &&
     PRODUCT_PROVENANCE_CAUSAL_PATTERNS.some((pattern) => pattern.test(text))

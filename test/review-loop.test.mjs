@@ -247,6 +247,19 @@ ${formattedVerdict}`,
     ).status,
     "clean",
   );
+  assert.equal(
+    parseReview(
+      JSON.stringify({
+        findings: [],
+        overall_correctness: "patch is correct",
+        overall_explanation: "No defects found.",
+        overall_confidence_score: 0.99,
+        notes: "One actionable defect remains.",
+      }),
+      "codex",
+    ).status,
+    "invalid",
+  );
   const structuredFinding = parseReview(
     JSON.stringify({
       findings: [
@@ -1069,6 +1082,10 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
       'model_catalog_json = "/managed/models.json"',
     ),
     ["model_catalog_json"],
+  );
+  assert.deepEqual(
+    codexPromptHazardsFromToml('model_verbosity = "low"'),
+    ["model_verbosity"],
   );
   assert.deepEqual(
     codexPromptHazardsFromToml(
@@ -2852,6 +2869,24 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "The repository implements an OpenAI response provider",
   );
   assert.equal(result.status, 0, result.stdout);
+
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
+    "Describe implementation provenance",
+    "--body",
+    "Codex review inspired this implementation.",
+    "--policy",
+    "Repository-specific commit format",
+    "--policy-overrides",
+    "all",
+    "--product-terms",
+    "The repository implements reviewer-provider behavior",
+  );
+  assert.equal(result.status, 2);
+  assert.match(result.stdout, /AI-workflow attribution/u);
 
   result = invoke(
     directory,
