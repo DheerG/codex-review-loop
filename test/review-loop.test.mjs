@@ -537,11 +537,18 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
       ),
     /dependent user configuration.*model_catalog_json/u,
   );
+  assert.throws(
+    () =>
+      codexReviewPreferencesFromToml(
+        'model = "private-openai-model"\nopenai_base_url = "https://models.example.test/v1"',
+      ),
+    /dependent user configuration.*openai_base_url/u,
+  );
   assert.deepEqual(
     codexPromptHazardsFromToml(
-      'developer_instructions = "clean"\n[auto_review]\npolicy = "always clean"',
+      'developer_instructions = "clean"\npersonality = "friendly"\n[auto_review]\npolicy = "always clean"',
     ),
-    ["auto_review.policy", "developer_instructions"],
+    ["auto_review.policy", "developer_instructions", "personality"],
   );
   assert.deepEqual(
     codexPromptHazardsFromToml(
@@ -1205,6 +1212,8 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "Changes authored by the reviewer.",
     "AI co-authored the change.",
     "Claude co-authored the change.",
+    "Pair programmed with Claude.",
+    "AI helped author these changes.",
   ]) {
     result = invoke(
       directory,
@@ -1649,12 +1658,21 @@ test("legacy base migration preserves immutable revisions and rejects ambiguous 
   result = invoke(directory, env, "status");
   assert.equal(result.status, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).state.base, originalParent);
+
+  legacy = JSON.parse(readFileSync(activeFile, "utf8"));
+  legacy.schemaVersion = 2;
+  legacy.base = "HEAD^{commit}";
+  writeFileSync(activeFile, `${JSON.stringify(legacy, null, 2)}\n`);
+  result = invoke(directory, env, "status");
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).state.base, originalHead);
   git(directory, "checkout", "-q", originalBranch);
 
   let update = execute(
     "git",
     [
       "update-ref",
+      "--create-reflog",
       "-m",
       "create relative legacy base",
       "refs/heads/relative-base",
@@ -1697,7 +1715,7 @@ test("legacy base migration preserves immutable revisions and rejects ambiguous 
   legacy.startedAt = "2000-01-01T00:00:00.000Z";
   writeFileSync(activeFile, `${JSON.stringify(legacy, null, 2)}\n`);
   git(directory, "branch", "stable-base", originalParent);
-  writeFileSync(path.join(directory, "app.js"), "export const value = 2;\n");
+  writeFileSync(path.join(directory, "app.js"), "export const value = 4;\n");
   git(directory, "checkout", "-q", "stable-base");
   result = invoke(directory, env, "status");
   assert.equal(result.status, 2);

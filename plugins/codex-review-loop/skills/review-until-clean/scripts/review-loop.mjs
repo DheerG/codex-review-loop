@@ -61,6 +61,7 @@ const CODEX_REVIEW_RETAINED_FEATURES = new Set([
   "use_legacy_landlock",
   "use_linux_sandbox_bwrap",
 ]);
+const GIT_REVISION_SUFFIX_SOURCE = String.raw`(?:\^\{(?:commit|tree|blob|tag|object)?\}|~\d*|\^\d*)`;
 const SKILL_SCRIPT = fileURLToPath(import.meta.url);
 
 function codexFeatureRequiresIsolation(feature) {
@@ -325,14 +326,20 @@ function isUnambiguousObjectPrefix(root, value, resolved) {
 }
 
 function reflogCovers(root, ref, startedAt) {
-  const result = git(root, ["reflog", "show", "--format=%ct", ref], {
+  const result = git(root, [
+    "reflog",
+    "show",
+    "--date=unix",
+    "--format=%gD",
+    ref,
+  ], {
     allowFailure: true,
   });
   if (result.status !== 0) return false;
   const timestamps = result.stdout
     .split(/\r?\n/u)
     .filter(Boolean)
-    .map(Number)
+    .map((selector) => Number(selector.match(/@\{(-?\d+)\}$/u)?.[1]))
     .filter(Number.isFinite);
   const startSecond = Math.floor(startedAt.valueOf() / 1_000);
   return (
@@ -345,7 +352,10 @@ function reflogCovers(root, ref, startedAt) {
 function pinPersistedBase(root, state) {
   const base = normalizeRef(state.base);
   const headRelative = base.match(
-    /^HEAD(?<suffix>(?:(?:~\d*|\^\d*)+)?)$/u,
+    new RegExp(
+      String.raw`^HEAD(?<suffix>(?:${GIT_REVISION_SUFFIX_SOURCE})*)$`,
+      "u",
+    ),
   );
   if (headRelative) {
     if (
@@ -364,7 +374,10 @@ function pinPersistedBase(root, state) {
   }
   const resolved = resolveBase(root, base);
   const relative = base.match(
-    /^(?<root>.+?)(?<suffix>(?:(?:~\d*|\^\d*)+))$/u,
+    new RegExp(
+      String.raw`^(?<root>.+?)(?<suffix>(?:${GIT_REVISION_SUFFIX_SOURCE})+)$`,
+      "u",
+    ),
   );
   const historicalRoot = relative?.groups.root ?? base;
   const historicalSuffix = relative?.groups.suffix ?? "";
@@ -1099,6 +1112,7 @@ export function codexReviewPreferencesFromToml(
   const preferences = {};
   let modelProvider;
   let modelCatalog = false;
+  let openAiBaseUrl = false;
   const configuredModelProviders = new Set();
   for (const record of effectiveCodexRecords(
     records,
@@ -1115,6 +1129,8 @@ export function codexReviewPreferencesFromToml(
       modelProvider = tomlStringValue(record.value ?? "", source);
     } else if (parts.length === 1 && parts[0] === "model_catalog_json") {
       modelCatalog = true;
+    } else if (parts.length === 1 && parts[0] === "openai_base_url") {
+      openAiBaseUrl = true;
     } else if (parts[0] === "model_providers" && parts[1]) {
       configuredModelProviders.add(parts[1]);
     }
@@ -1128,6 +1144,9 @@ export function codexReviewPreferencesFromToml(
       dependencies.push(`model_provider=${JSON.stringify(modelProvider)}`);
     }
     if (modelCatalog) dependencies.push("model_catalog_json");
+    if (openAiBaseUrl && effectiveModelProvider === "openai") {
+      dependencies.push("openai_base_url");
+    }
     if (dependencies.length > 0) {
       throw new CliError(
         `Cannot safely copy Codex model preferences without dependent user configuration: ${dependencies.join(", ")}. Use --isolate-codex-config or remove the dependent model preference.`,
@@ -1156,6 +1175,7 @@ export function codexPromptHazardsFromToml(
     "instructions",
     "model_catalog_json",
     "model_instructions_file",
+    "personality",
     "project_doc_fallback_filenames",
     "project_doc_max_bytes",
     "project_root_markers",
@@ -1605,8 +1625,9 @@ function configuredCodexMcpServers(state, env) {
       selectedLegacyProfile,
     );
   }
-  // Cloud bundles contain requirements, whose MCP table restricts configured
-  // identities; they do not add server transports to the effective config.
+  // Codex loads cloud data as ConfigRequirements. Its MCP entries are identity
+  // constraints applied to configured servers; they can disable a transport
+  // but cannot define or add one.
   return [...names].sort();
 }
 
@@ -2520,7 +2541,7 @@ function longCommitProseLine(body) {
 }
 
 const AI_ATTRIBUTION_IDENTITY_SOURCE = String.raw`(?:ai|artificial intelligence|llm|language model|assistant|agent|bot|reviewer|codex|claude|gemini|chatgpt|gpt(?:-\d+(?:\.\d+)*)?|openai|anthropic|opencode|(?:github\s+)?copilot|cursor|windsurf|aider|devin|codeium|tabnine|qodo|amazon\s+q|sourcegraph\s+cody)`;
-const AI_AUTHORSHIP_ACTION_SOURCE = String.raw`(?:reviewed|generated|suggested|assisted|authored|co[ -]?authored|written|created|made|produced)`;
+const AI_AUTHORSHIP_ACTION_SOURCE = String.raw`(?:reviewed|generated|suggested|assisted|authored|co[ -]?authored|written|created|made|produced|programmed|pair[ -]?programmed|help(?:ed|s|ing)?(?:\s+(?:to\s+)?author)?)`;
 const AI_ATTRIBUTION_IDENTITY = new RegExp(
   String.raw`\b${AI_ATTRIBUTION_IDENTITY_SOURCE}\b`,
   "iu",
