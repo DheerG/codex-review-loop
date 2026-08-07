@@ -2159,6 +2159,9 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "- FOO=bar codex wrote this code --strict",
     "- env FOO=bar Reviewed by Codex",
     "- $ env FOO=bar Reviewed by Codex",
+    "- $ npm test -- retry # Reviewed by Codex",
+    "- `npm test -- retry # Reviewed by Codex`",
+    "- npm test -- retry # Reviewed by Codex",
   ]) {
     result = invoke(
       directory,
@@ -2243,6 +2246,18 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "Preserve multiline verification evidence",
     "--body",
     `${narrativeCommitBody}\n- node --test \\\n${longContinuation}`,
+  );
+  assert.equal(result.status, 0, result.stderr);
+
+  const longEnvironmentContinuation = `  BAR="${"preserve environment continuation ".repeat(5).trim()}" \\`;
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
+    "Preserve multiline environment evidence",
+    "--body",
+    `${narrativeCommitBody}\n- FOO=one \\\n${longEnvironmentContinuation}\n  npm test`,
   );
   assert.equal(result.status, 0, result.stderr);
 
@@ -2865,6 +2880,8 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "Reviewer feedback prompted this change",
     "Codex-generated feedback prompted this change",
     "AI-generated findings informed these changes",
+    "Implemented according to Codex feedback",
+    "Changes follow Codex feedback",
     "Changes were prompted by Codex-generated feedback",
     "Review feedback led to this change",
     "Address GitHub Copilot review feedback",
@@ -3153,6 +3170,34 @@ test("legacy base migration preserves immutable revisions and rejects ambiguous 
   );
   assert.equal(update.status, 0, update.stderr);
 
+  legacy = JSON.parse(readFileSync(activeFile, "utf8"));
+  legacy.schemaVersion = 2;
+  legacy.base = "relative-base~1";
+  legacy.startedAt = "2020-01-01T00:00:00.000Z";
+  writeFileSync(activeFile, `${JSON.stringify(legacy, null, 2)}\n`);
+  result = invoke(directory, env, "status");
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).state.base, originalParent);
+
+  update = execute(
+    "git",
+    [
+      "update-ref",
+      "-m",
+      "shorten relative legacy base",
+      "refs/heads/relative-base",
+      originalParent,
+    ],
+    directory,
+    { ...process.env, GIT_COMMITTER_DATE: "2050-01-01T00:00:00Z" },
+  );
+  assert.equal(update.status, 0, update.stderr);
+  const unresolvedRelative = execute(
+    "git",
+    ["rev-parse", "--verify", "--quiet", "relative-base~1^{commit}"],
+    directory,
+  );
+  assert.notEqual(unresolvedRelative.status, 0);
   legacy = JSON.parse(readFileSync(activeFile, "utf8"));
   legacy.schemaVersion = 2;
   legacy.base = "relative-base~1";

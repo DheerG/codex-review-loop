@@ -433,7 +433,6 @@ function pinPersistedBase(root, state) {
       `${state.initialHead}${headRelative.groups.suffix}`,
     );
   }
-  const resolved = resolveBase(root, base);
   const relative = base.match(
     new RegExp(
       String.raw`^(?<root>.+?)(?<suffix>(?:${GIT_REVISION_SUFFIX_SOURCE})+)$`,
@@ -442,15 +441,18 @@ function pinPersistedBase(root, state) {
   );
   const historicalRoot = relative?.groups.root ?? base;
   const historicalSuffix = relative?.groups.suffix ?? "";
-  const resolvedRoot = relative
+  const resolved = refExists(root, base) ? resolveBase(root, base) : null;
+  const resolvedRoot = relative && refExists(root, historicalRoot)
     ? resolveBase(root, historicalRoot)
     : resolved;
   if (
-    base === resolved ||
-    isUnambiguousObjectPrefix(root, base, resolved) ||
-    (relative &&
-      (historicalRoot === resolvedRoot ||
-        isUnambiguousObjectPrefix(root, historicalRoot, resolvedRoot)))
+    resolved &&
+    (base === resolved ||
+      isUnambiguousObjectPrefix(root, base, resolved) ||
+      (relative &&
+        resolvedRoot &&
+        (historicalRoot === resolvedRoot ||
+          isUnambiguousObjectPrefix(root, historicalRoot, resolvedRoot))))
   ) {
     return resolved;
   }
@@ -3417,6 +3419,8 @@ const WORKFLOW_ATTRIBUTION_PATTERNS = [
   /\b(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance)\s+(?:from|by)\s+(?:(?:an?|the)\s+)?(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode|ai|llm|reviewer)\b/iu,
   /\b(?:found|identified|reported|flagged|raised|caught|suggested|requested|required)\s+(?:by|during|in|from|through)\s+(?:(?:the|a)\s+)?(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?(?:review|reviewer|feedback|findings?|comments?)|(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu,
   /\b(?:based\s+on|because\s+of|prompted\s+by|in\s+response\s+to)\s+(?:(?:the|a)\s+)?(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?(?:review|reviewer|feedback|findings?|comments?)|(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu,
+  /\b(?:according\s+to|in\s+accordance\s+with|due\s+to|owing\s+to|guided\s+by|informed\s+by|derived\s+from)\s+(?:(?:the|a)\s+)?(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?(?:review|reviewer|feedback|findings?|comments?)|(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu,
+  /\b(?:changes?|code|implementation|commits?|patch|work)\b.{0,20}\b(?:follow(?:s|ed|ing)?|reflect(?:s|ed|ing)?)\s+(?:(?:the|a)\s+)?(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?(?:review|reviewer|feedback|findings?|comments?)|(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu,
   /\b(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?review(?:er)?\s+)?(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance)\s+(?:prompted|caused|drove|motivated|triggered|led\s+to|resulted\s+in)\s+(?:(?:this|the|these)\s+)?(?:changes?|code|implementation|commits?|patch|work)\b/iu,
   /\bper\s+(?:(?:the|a)\s+(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?(?:review|reviewer|feedback|findings?|comments?)|(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))|(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?review(?:er)?\s+(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu,
   /\bfollowing\s+(?:(?:the|a)\s+)?(?:(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?review(?:er)?\s+)?(?:feedback|findings?|comments?)|(?:(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?review(?:er)?|(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode))\s+(?:suggestions?|requests?|recommendations?|instructions?|guidance))\b/iu,
@@ -3552,13 +3556,64 @@ function withoutLeadingEnvironmentAssignments(text) {
   );
 }
 
+function isEnvironmentOnlyCommandContinuation(text) {
+  if (!hasShellContinuationMarker(text)) return false;
+  if (hasWorkflowAttribution(text) || hasExplicitAiAuthorship(text)) {
+    return false;
+  }
+  const assignmentText = text
+    .trimEnd()
+    .replace(/(?:&&|\|\||\||\\+|\^+|`+)$/u, "")
+    .trimEnd();
+  return /^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"(?:\\.|[^"])*"|'[^']*'|\S+)(?:\s+|$))+$/u.test(
+    assignmentText,
+  );
+}
+
+function shellComment(text) {
+  let quote = null;
+  let escaped = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (character === quote) quote = null;
+      continue;
+    }
+    if (character === "'" || character === '"' || character === "`") {
+      quote = character;
+      continue;
+    }
+    if (character === "#" && (index === 0 || /\s/u.test(text[index - 1]))) {
+      return text.slice(index + 1).trim();
+    }
+  }
+  return "";
+}
+
+function hasAttributedShellComment(text) {
+  const comment = shellComment(text);
+  return Boolean(
+    comment &&
+      (hasWorkflowAttribution(comment) || hasExplicitAiAuthorship(comment)),
+  );
+}
+
 function isCommandShapedVerification(text) {
   const shellPrompt = text.match(/^\$\s+(.+)/u);
   if (shellPrompt) {
     const command = withoutLeadingEnvironmentAssignments(shellPrompt[1]);
     return (
       !startsWithWorkflowAttribution(command) &&
-      !startsWithExplicitAiAuthorship(command)
+      !startsWithExplicitAiAuthorship(command) &&
+      !hasAttributedShellComment(command)
     );
   }
   const markdownCommand = text.match(/^`([^`]+)`$/u);
@@ -3568,9 +3623,11 @@ function isCommandShapedVerification(text) {
     );
     return (
       !startsWithWorkflowAttribution(command) &&
-      !startsWithExplicitAiAuthorship(command)
+      !startsWithExplicitAiAuthorship(command) &&
+      !hasAttributedShellComment(command)
     );
   }
+  if (isEnvironmentOnlyCommandContinuation(text)) return true;
   const command = withoutLeadingEnvironmentAssignments(text);
   if (
     startsWithWorkflowAttribution(command) ||
@@ -3593,7 +3650,7 @@ function isCommandShapedVerification(text) {
     hasEnvironment || pathCommand || hasUnambiguousShellSyntax(text);
   if (!commonCommand && !explicitSyntax) return false;
   const attributionLike = hasWorkflowAttribution(text);
-  return !attributionLike || explicitSyntax;
+  return !hasAttributedShellComment(text) && (!attributionLike || explicitSyntax);
 }
 
 function hasUnambiguousShellSyntax(text) {
