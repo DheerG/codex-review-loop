@@ -1782,19 +1782,7 @@ function configuredCodexMcpServers(state, env) {
       selectedLegacyProfile,
     );
   }
-  const usesReadOnlyDefaultPermissions = [
-    ...ordinaryConfigs,
-    ...requirementsConfigs,
-    ...managedConfigs,
-  ].some((config) =>
-    codexUsesReadOnlyDefaultPermissions(
-      config.contents,
-      config.file,
-      options,
-    ),
-  );
   return withCodexIsolationMetadata([...names].sort(), {
-    usesReadOnlyDefaultPermissions,
     localConfigInventory: {
       ordinaryConfigs,
       managedConfigs,
@@ -2523,8 +2511,7 @@ function providerInvocation(state, prompt, env, repo) {
               root: state.root,
               preferences,
               usesReadOnlyDefaultPermissions: Boolean(
-                mcpServers.usesReadOnlyDefaultPermissions ||
-                  disabledFeatures.usesReadOnlyDefaultPermissions,
+                disabledFeatures.usesReadOnlyDefaultPermissions,
               ),
               authOverrides: disabledFeatures.authOverrides,
             },
@@ -3196,7 +3183,7 @@ const WORKFLOW_ATTRIBUTION_PATTERNS = [
   /\b(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?review(?:er)?\s+(?:asked|requested|required|suggested|said|recommended|instructed|flagged|identified)\b/iu,
   /\b(?:(?:an?|the)\s+)?(?:(?:ai|llm)(?:\s+review(?:er)?)?|review(?:er)?)\s+(?:found|identified|reported|flagged|raised|caught|suggested|requested|required)\b/iu,
   /\b(?:found|identified|reported|flagged|raised|caught|suggested|requested|required)\s+(?:by|during|in|from|through)\s+(?:(?:an?|the)\s+)?(?:(?:ai|llm)(?:\s+review(?:er)?)?|review(?:er)?)\b/iu,
-  /\b(?:address(?:es|ed|ing)?|appl(?:y|ies|ied|ying)|fix(?:es|ed|ing)?|resolv(?:e|es|ed|ing)|handl(?:e|es|ed|ing)|incorporat(?:e|es|ed|ing)|implement(?:s|ed|ing)?|clos(?:e|es|ed|ing)|clear(?:s|ed|ing)?|tackl(?:e|es|ed|ing)|satisf(?:y|ies|ied|ying))\s+(?:the\s+)?(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+review(?:er)?|(?:ai|llm)(?:\s+review(?:er)?)?|review(?:er)?)\s+(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance)\b/iu,
+  /\b(?:address(?:es|ed|ing)?|appl(?:y|ies|ied|ying)|fix(?:es|ed|ing)?|resolv(?:e|es|ed|ing)|handl(?:e|es|ed|ing)|incorporat(?:e|es|ed|ing)|implement(?:s|ed|ing)?|clos(?:e|es|ed|ing)|clear(?:s|ed|ing)?|tackl(?:e|es|ed|ing)|satisf(?:y|ies|ied|ying)|(?:respond|react)(?:s|ed|ing)?\s+to)\s+(?:the\s+)?(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+review(?:er)?|(?:ai|llm)(?:\s+review(?:er)?)?|review(?:er)?)\s+(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance)\b/iu,
   /\b(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?review(?:er)?\s+(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance)\s+(?:was|were|is|are|has\s+been|have\s+been)\s+(?:addressed|applied|fixed|resolved|handled|incorporated|implemented|closed|cleared|tackled|satisfied)\b/iu,
   /\b(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?review(?:er)?(?:\s+loop)?\s+(?:passed|completed|succeeded|finished|approved|was\s+clean)\b/iu,
   /\b(?:ai|llm)[ -]?(?:generated|assisted|reviewed|suggested)\b/iu,

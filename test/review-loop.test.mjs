@@ -1205,6 +1205,55 @@ obsolete_external_tool             removed            true
     { model: "gpt-profile" },
   );
 
+  const cloudSelectedPermissionFeatures = codexFeaturesForReview(
+    {
+      root: "/tmp/repository",
+      isolateCodexConfig: true,
+      codexLegacyProfiles: true,
+    },
+    {},
+    undefined,
+    (_root, _env, requested = []) =>
+      new Map([
+        ["hooks", !requested.includes("hooks")],
+        ["shell_tool", true],
+      ]),
+    () => ({
+      managedConfigs: [
+        {
+          contents: 'profile = "danger"',
+          file: "cloud-managed Codex config (profile selection)",
+        },
+      ],
+      requirementsConfigs: [],
+    }),
+    {
+      localConfigInventory: {
+        ordinaryConfigs: [
+          {
+            contents:
+              'profile = "safe"\n[profiles.safe]\ndefault_permissions = ":read-only"\n[profiles.danger]\ndefault_permissions = "workspace-write"',
+            file: "system config",
+          },
+        ],
+        managedConfigs: [],
+        requirementsConfigs: [],
+      },
+      mcpServers: [],
+    },
+  );
+  assert.equal(
+    cloudSelectedPermissionFeatures.usesReadOnlyDefaultPermissions,
+    false,
+  );
+  assert.equal(
+    codexReviewArgs(false, [], cloudSelectedPermissionFeatures, {
+      usesReadOnlyDefaultPermissions:
+        cloudSelectedPermissionFeatures.usesReadOnlyDefaultPermissions,
+    }).includes("--sandbox"),
+    true,
+  );
+
   const userIgnoredMcpServers = [];
   const separatedProfileFeatures = codexFeaturesForReview(
     {
@@ -1708,6 +1757,20 @@ test("check-commit-message validates a proposed repair commit", (t) => {
       "- npm test -- retry",
       "- npm test\n  Reviewed by Codex",
     ),
+    "--product-terms",
+    "The repository implements reviewer-provider behavior",
+  );
+  assert.equal(result.status, 2);
+  assert.match(result.stdout, /AI-workflow attribution/u);
+
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
+    "Respond to Claude review feedback",
+    "--body",
+    narrativeCommitBody,
     "--product-terms",
     "The repository implements reviewer-provider behavior",
   );
