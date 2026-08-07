@@ -1503,9 +1503,9 @@ export function codexRequirementsHazardsFromToml(
       record.parts.length === 3 &&
       key === "permissions" &&
       child === "filesystem" &&
-      record.parts[2] === "deny_read"
+      ["allow", "deny_read"].includes(record.parts[2])
     ) {
-      hazards.add("permissions.filesystem.deny_read");
+      hazards.add(`permissions.filesystem.${record.parts[2]}`);
     } else if (
       record.parts.length === 2 &&
       ["features", "feature_requirements"].includes(key) &&
@@ -3456,7 +3456,7 @@ const AI_ATTRIBUTION_IDENTITY = new RegExp(
   "iu",
 );
 const AI_ATTRIBUTION_TRAILER_IDENTITY = new RegExp(
-  String.raw`^(?:(?:automated|generative)\s+)?${AI_ATTRIBUTION_IDENTITY_SOURCE}(?:\s+(?:assistant|agent|bot|reviewer|tool|cli|code|codex|developer|claude|gemini|chatgpt|gpt(?:-\d+(?:\.\d+)*)?)){0,3}$`,
+  String.raw`^(?:(?:automated|generative)\s+)?${AI_ATTRIBUTION_IDENTITY_SOURCE}(?:\s+(?:assistant|agent|bot|reviewer|tool|cli|code|codex|developer|claude|gemini|chatgpt|gpt(?:-\d+(?:\.\d+)*)?|sonnet|opus|haiku|pro|max|mini|nano|flash|ultra|preview|thinking|coder|\d+(?:\.\d+)*)){0,4}$`,
   "iu",
 );
 const EXPLICIT_AI_AUTHORSHIP_PATTERNS = [
@@ -3576,6 +3576,12 @@ function inspectCommitMessageWithPolicy(subject, body, options) {
         } else if (!content) {
           issues.push(`${section}: section is empty`);
         }
+      }
+      const verification = commitSection(body, "Verification");
+      if (verification && verificationEvidenceLines(body).size === 0) {
+        issues.push(
+          "Verification: section must include an exact command that was run",
+        );
       }
     }
     const longLine = longCommitProseLine(body);

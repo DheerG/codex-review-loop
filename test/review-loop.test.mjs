@@ -606,6 +606,12 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
     ["permissions.filesystem.deny_read"],
   );
   assert.deepEqual(
+    codexRequirementsHazardsFromToml(
+      '[permissions.filesystem]\nallow = ["/tmp/repository/public"]',
+    ),
+    ["permissions.filesystem.allow"],
+  );
+  assert.deepEqual(
     codexManagedHazardsFromToml(
       "[features]\nbrowser_use = true\ncode_mode_host = true\nshell_tool = true",
     ),
@@ -1707,6 +1713,18 @@ test("commit-message rules reject workflow narration", () => {
     ).join("\n"),
     /missing the Failure: section/u,
   );
+  for (const placeholder of ["TODO", "Not run"]) {
+    assert.match(
+      inspectCommitMessage(
+        "Preserve errors across retry exhaustion",
+        narrativeCommitBody.replace(
+          "- npm test -- retry\n- npm run validate",
+          placeholder,
+        ),
+      ).join("\n"),
+      /must include an exact command/u,
+    );
+  }
 });
 
 test("check-commit-message validates a proposed repair commit", (t) => {
@@ -2331,6 +2349,8 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "Co-authored-by: Claude Code Agent",
     "Co-authored-by: Anthropic Claude Code",
     "Co-authored-by: Amazon Q Developer",
+    "Co-authored-by: Claude Sonnet <bot@example.com>",
+    "Co-authored-by: Claude 3.5 Sonnet <bot@example.com>",
   ]) {
     result = invoke(
       directory,
