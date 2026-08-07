@@ -1189,7 +1189,12 @@ function effectiveCodexRecords(records, options, localSelectedProfile) {
         localSelectedProfile,
       );
       if (!parts) continue;
-      effective.set(JSON.stringify(parts), { ...record, parts });
+      effective.set(JSON.stringify(parts), {
+        ...record,
+        parts,
+        legacyProfile:
+          record.parts[0] === "profiles" ? record.parts[1] : null,
+      });
     }
   }
   return [...effective.values()];
@@ -1207,9 +1212,18 @@ function effectiveCodexRecordsFromConfigs(configs, options = {}) {
       options,
       selectedLegacyProfile,
     )) {
+      const retainedLegacyProfile = Object.hasOwn(
+        options,
+        "retainedLegacyProfile",
+      )
+        ? options.retainedLegacyProfile
+        : options.selectedLegacyProfile;
       effective.set(JSON.stringify(record.parts), {
         ...record,
-        retainedForReview: config.retainedForReview === true,
+        retainedForReview:
+          config.retainedForReview === true &&
+          (!record.legacyProfile ||
+            record.legacyProfile === retainedLegacyProfile),
       });
     }
   }
@@ -2011,7 +2025,11 @@ function configuredCodexReviewPreferences(state, env, options = {}) {
   return codexReviewPreferencesFromConfigs(
     options.preferenceConfigs ?? context.configs,
     "layered Codex review configuration",
-    { legacyProfiles: context.legacyProfiles, selectedLegacyProfile },
+    {
+      legacyProfiles: context.legacyProfiles,
+      selectedLegacyProfile,
+      retainedLegacyProfile: options.retainedLegacyProfile,
+    },
   );
 }
 
@@ -2645,6 +2663,7 @@ function providerInvocation(state, prompt, env, repo) {
             preferenceContext,
             selectedLegacyProfile:
               disabledFeatures.selectedLegacyPreferenceProfile,
+            retainedLegacyProfile: disabledFeatures.selectedLegacyProfile,
             preferenceConfigs: disabledFeatures.preferenceConfigs,
           },
         );

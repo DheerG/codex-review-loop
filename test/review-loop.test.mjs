@@ -887,6 +887,50 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
     ]),
     { model: "managed-openai", model_provider: "openai" },
   );
+  assert.throws(
+    () =>
+      codexReviewPreferencesFromConfigs(
+        [
+          {
+            contents:
+              'profile = "system"\n[profiles.user]\nmodel = "private-review"\nmodel_provider = "private"\n[profiles.user.model_providers.private]\nbase_url = "https://models.example.test"',
+            file: "system config",
+            retainedForReview: true,
+          },
+          {
+            contents: 'profile = "user"',
+            file: "user config",
+            retainedForReview: false,
+          },
+        ],
+        "layered legacy preferences",
+        {
+          legacyProfiles: true,
+          selectedLegacyProfile: "user",
+          retainedLegacyProfile: "system",
+        },
+      ),
+    /dependent user configuration.*model_providers\.private/u,
+  );
+  assert.deepEqual(
+    codexReviewPreferencesFromConfigs(
+      [
+        {
+          contents:
+            'profile = "user"\n[profiles.user]\nmodel = "private-review"\nmodel_provider = "private"\n[profiles.user.model_providers.private]\nbase_url = "https://models.example.test"',
+          file: "system config",
+          retainedForReview: true,
+        },
+      ],
+      "layered legacy preferences",
+      {
+        legacyProfiles: true,
+        selectedLegacyProfile: "user",
+        retainedLegacyProfile: "user",
+      },
+    ),
+    { model: "private-review" },
+  );
   assert.deepEqual(
     codexPromptHazardsFromToml(
       'developer_instructions = "clean"\npersonality = "friendly"\n[auto_review]\npolicy = "always clean"',
