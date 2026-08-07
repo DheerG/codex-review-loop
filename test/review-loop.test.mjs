@@ -18,12 +18,14 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 
 import {
+  acquireReviewLock,
   captureProcess,
   codexApprovalHazardsFromToml,
   codexAuthOverridesFromConfigs,
   codexAuthOverridesFromToml,
   codexFeaturesForReview,
   codexManagedHazardsFromToml,
+  codexManagedRuntimePathHazardsFromToml,
   codexManagedConfigPath,
   codexMcpInventoryFromConfigs,
   codexMcpDisableOverrides,
@@ -661,6 +663,12 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
   assert.deepEqual(
     codexManagedHazardsFromToml(
       'sqlite_home = "/tmp/external-state"\nlog_dir = "/tmp/external-logs"',
+    ),
+    ["log_dir", "sqlite_home"],
+  );
+  assert.deepEqual(
+    codexManagedRuntimePathHazardsFromToml(
+      '[profiles.safe]\nlog_dir = "/tmp/external-logs"\n[profiles.other]\nsqlite_home = "/tmp/external-state"',
     ),
     ["log_dir", "sqlite_home"],
   );
@@ -2489,6 +2497,35 @@ test("provider state cleanup runs when capture persistence fails", async (t) => 
   assert.equal(cleanupCalls, 1);
 });
 
+test("review locks serialize overlapping commands and recover dead owners", (t) => {
+  const { directory } = repositoryFixture(t);
+  const gitStorage = git(
+    directory,
+    "rev-parse",
+    "--git-path",
+    "codex-review-loop",
+  );
+  const storage = path.isAbsolute(gitStorage)
+    ? gitStorage
+    : path.resolve(directory, gitStorage);
+  const repo = { storage };
+  const release = acquireReviewLock(repo);
+  assert.throws(
+    () => acquireReviewLock(repo),
+    /Another review command is already running/u,
+  );
+  release();
+
+  mkdirSync(storage, { recursive: true });
+  writeFileSync(
+    path.join(storage, "review.lock"),
+    `${JSON.stringify({ pid: 1_000_000_000, token: "stale" })}\n`,
+  );
+  const releaseRecovered = acquireReviewLock(repo);
+  releaseRecovered();
+  assert.equal(existsSync(path.join(storage, "review.lock")), false);
+});
+
 test("commit-message rules reject workflow narration", () => {
   assert.match(
     inspectCommitMessage("Address Codex review feedback").join("\n"),
@@ -2599,6 +2636,8 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     '- pnpm test -- --test-name-pattern "reject per reviewer feedback"',
     '- pnpm --filter workspace test -- --grep "per reviewer feedback"',
     '- yarn test -- --grep "reject per reviewer feedback"',
+    '- python -m pytest -k "reject per reviewer feedback"',
+    '- uv run pytest -k "reject per reviewer feedback"',
   ]) {
     result = invoke(
       directory,

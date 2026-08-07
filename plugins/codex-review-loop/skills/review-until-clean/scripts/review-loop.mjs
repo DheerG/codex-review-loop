@@ -8,6 +8,7 @@ import {
   constants,
   existsSync,
   fstatSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -391,6 +392,67 @@ function loadActive(repo, options = {}) {
 function saveActive(repo, state) {
   state.updatedAt = new Date().toISOString();
   writeJsonAtomic(repo.activeFile, state);
+}
+
+export function acquireReviewLock(repo) {
+  mkdirSync(repo.storage, { recursive: true });
+  const lockFile = path.join(repo.storage, "review.lock");
+  const token = randomUUID();
+  const owner = {
+    pid: process.pid,
+    token,
+    startedAt: new Date().toISOString(),
+  };
+  const candidate = `${lockFile}.${process.pid}.${token}.tmp`;
+  writeFileSync(candidate, `${JSON.stringify(owner)}\n`, {
+    encoding: "utf8",
+    mode: 0o600,
+    flag: "wx",
+  });
+  try {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        linkSync(candidate, lockFile);
+        break;
+      } catch (error) {
+        if (error?.code !== "EEXIST") throw error;
+        let existing;
+        try {
+          existing = JSON.parse(readFileSync(lockFile, "utf8"));
+        } catch (readError) {
+          throw new CliError(
+            `Cannot inspect the existing review lock: ${readError.message}`,
+            5,
+          );
+        }
+        if (
+          attempt === 0 &&
+          Number.isSafeInteger(existing.pid) &&
+          !codexProcessIsRunning(existing.pid)
+        ) {
+          rmSync(lockFile);
+          continue;
+        }
+        throw new CliError(
+          `Another review command is already running${Number.isSafeInteger(existing.pid) ? ` in process ${existing.pid}` : ""}.`,
+          5,
+        );
+      }
+    }
+  } finally {
+    rmSync(candidate, { force: true });
+  }
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    try {
+      const existing = JSON.parse(readFileSync(lockFile, "utf8"));
+      if (existing.token === token) rmSync(lockFile);
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+  };
 }
 
 function normalizeRef(ref) {
@@ -2140,8 +2202,23 @@ function codexConfigFile(file) {
   return { contents: readBoundedCodexConfig(file), file };
 }
 
+export function codexManagedRuntimePathHazardsFromToml(
+  contents,
+  source = "managed Codex config",
+) {
+  const { records } = codexConfigRecords(contents, source);
+  return [
+    ...new Set(
+      records
+        .filter((record) =>
+          ["log_dir", "sqlite_home"].includes(record.parts.at(-1)),
+        )
+        .map((record) => record.parts.at(-1)),
+    ),
+  ].sort();
+}
+
 function configuredCodexMcpServers(state, env) {
-  const legacyProfiles = codexUsesLegacyProfiles(state, env);
   const requirementsConfigs = [];
   const systemRequirements = codexConfigFile(codexRequirementsPath(env));
   if (systemRequirements) requirementsConfigs.push(systemRequirements);
@@ -2171,7 +2248,20 @@ function configuredCodexMcpServers(state, env) {
       file: "managed Codex preferences",
     });
   }
+  for (const config of managedConfigs) {
+    const runtimeHazards = codexManagedRuntimePathHazardsFromToml(
+      config.contents,
+      config.file,
+    );
+    if (runtimeHazards.length > 0) {
+      throw new CliError(
+        `Cannot safely start Codex with managed runtime paths from ${config.file}: ${runtimeHazards.join(", ")}.`,
+        3,
+      );
+    }
+  }
 
+  const legacyProfiles = codexUsesLegacyProfiles(state, env);
   const names = codexMcpInventoryFromConfigs(
     ordinaryConfigs,
     managedConfigs,
@@ -3537,6 +3627,15 @@ async function startCommand(repo, options, env) {
 }
 
 async function reviewCommand(repo, env) {
+  const releaseReviewLock = acquireReviewLock(repo);
+  try {
+    return await reviewCommandWithLock(repo, env);
+  } finally {
+    releaseReviewLock();
+  }
+}
+
+async function reviewCommandWithLock(repo, env) {
   const state = loadActive(repo);
   state.root = repo.root;
   if (!["active", "provider_error", "invalid", "clean"].includes(state.phase)) {
@@ -4093,11 +4192,13 @@ function testSelectorContext(command) {
   if (!invocation) return null;
   let executable = shellExecutableName(invocation.word);
   let args = invocation.rest;
+  let selectorOffset = 0;
   if (["bunx", "npx"].includes(executable)) {
     invocation = shellWordAndRest(args.trimStart());
     if (!invocation) return null;
     executable = shellExecutableName(invocation.word);
     args = invocation.rest;
+    selectorOffset = command.length - args.length;
   } else if (
     ["pnpm", "yarn"].includes(executable) &&
     /^(?:dlx|exec)\s+/u.test(args)
@@ -4106,8 +4207,27 @@ function testSelectorContext(command) {
     if (!invocation) return null;
     executable = shellExecutableName(invocation.word);
     args = invocation.rest;
+    selectorOffset = command.length - args.length;
+  } else if (
+    ["python", "python3"].includes(executable) &&
+    /^-m\s+pytest(?:\s|$)/u.test(args)
+  ) {
+    args = args.replace(/^-m\s+pytest(?:\s+|$)/u, "");
+    executable = "pytest";
+    selectorOffset = command.length - args.length;
+  } else if (
+    ["pdm", "pipenv", "poetry", "rye", "uv"].includes(executable) &&
+    /^run\s+/u.test(args)
+  ) {
+    invocation = shellWordAndRest(
+      args.replace(/^run\s+(?:--\s+)?/u, ""),
+    );
+    if (!invocation) return null;
+    executable = shellExecutableName(invocation.word);
+    args = invocation.rest;
+    selectorOffset = command.length - args.length;
   }
-  const context = (options, offset = 0) => ({ offset, options });
+  const context = (options, offset = selectorOffset) => ({ offset, options });
   switch (executable) {
     case "node":
       return /(?:^|\s)--test(?:\s|$)/u.test(args)
