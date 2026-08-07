@@ -3399,6 +3399,10 @@ const WORKFLOW_ATTRIBUTION_PATTERNS = [
     "iu",
   ),
   new RegExp(
+    String.raw`\b${WORKFLOW_ACTION_SOURCE}\s+(?:the\s+)?${WORKFLOW_ARTIFACT_SOURCE}\s+(?:in|from|during)\s+(?:the\s+)?(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?review\b`,
+    "iu",
+  ),
+  new RegExp(
     String.raw`\b${WORKFLOW_ARTIFACT_SOURCE}\s+(?:from|by)\s+(?:(?:an?|the)\s+)?${AI_ATTRIBUTION_IDENTITY_SOURCE}\b`,
     "iu",
   ),
@@ -3687,6 +3691,15 @@ function verificationEvidenceLines(
       commandContinues = false;
       continue;
     }
+    if (
+      /^(?:#{1,6}\s+\S.*|[A-Za-z][A-Za-z0-9 /_-]{0,80}:)\s*$/u.test(
+        line.trim(),
+      )
+    ) {
+      section = null;
+      commandContinues = false;
+      continue;
+    }
     if (!anySection && section !== "Verification") continue;
     if (isVerbatimVerificationCommand(line)) {
       evidence.add(index);
@@ -3769,7 +3782,7 @@ const AI_ATTRIBUTION_IDENTITY = new RegExp(
   "iu",
 );
 const AI_ATTRIBUTION_TRAILER_IDENTITY = new RegExp(
-  String.raw`^(?:(?:automated|generative)\s+)?${AI_ATTRIBUTION_IDENTITY_SOURCE}(?:\s+(?:assistant|agent|bot|reviewer|team|tool|cli|code|codex|developer|claude|gemini|chatgpt|gpt(?:-\d+(?:\.\d+)*)?|sonnet|opus|haiku|pro|max|mini|nano|flash|ultra|preview|thinking|coder|\d+(?:\.\d+)*|\d+[a-z][a-z0-9.]*)){0,4}$`,
+  String.raw`^(?:(?:automated|generative)\s+)?${AI_ATTRIBUTION_IDENTITY_SOURCE}(?:\s+(?:ai|llm|artificial\s+intelligence|language\s+model|assistant|agent|bot|reviewer|team|tool|cli|code|codex|developer|claude|gemini|chatgpt|gpt(?:-\d+(?:\.\d+)*)?|sonnet|opus|haiku|pro|max|mini|nano|flash|ultra|preview|thinking|coder|\d+(?:\.\d+)*|\d+[a-z][a-z0-9.]*)){0,4}$`,
   "iu",
 );
 const COMPOSITE_AI_PROVIDER_IDENTITY = new RegExp(

@@ -2129,6 +2129,20 @@ test("check-commit-message validates a proposed repair commit", (t) => {
   assert.equal(clean.policy.mode, "default");
   assert.match(clean.historyPolicy, /existing commits are never inspected/u);
 
+  for (const unknownHeading of ["Notes:", "### Notes"]) {
+    result = invoke(
+      directory,
+      env,
+      "check-commit-message",
+      "--subject",
+      "Require verification in its declared section",
+      "--body",
+      `Failure:\nVerification evidence could be counted outside its declared section.\n\nChange:\nStop evidence collection when another heading begins.\n\nVerification:\nNot run.\n\n${unknownHeading}\n- npm test`,
+    );
+    assert.equal(result.status, 2, `${unknownHeading}\n${result.stdout}`);
+    assert.match(result.stdout, /Verification.*exact command/u);
+  }
+
   result = invoke(
     directory,
     env,
@@ -2817,6 +2831,7 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "Signed-off-by: OpenAI Maintainers <maintainers@example.com>",
     "Co-authored-by:\n Codex",
     "Reviewed-by:\n Codex Team <team@example.com>",
+    "Helped-by: Claude AI",
   ]) {
     result = invoke(
       directory,
@@ -2959,6 +2974,7 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "Resolve the AI reviewer's findings",
     "Honor reviewer feedback",
     "Follow reviewer feedback",
+    "Address the comments in review",
   ]) {
     result = invoke(
       directory,
