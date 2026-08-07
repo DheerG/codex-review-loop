@@ -22,6 +22,7 @@ import {
   codexMcpDisableOverride,
   codexMcpNamesFromToml,
   codexMcpServersForReview,
+  codexPreflightTimeout,
   codexPromptHazardsFromToml,
   codexReviewArgs,
   codexReviewPreferencesFromToml,
@@ -223,6 +224,48 @@ ${formattedVerdict}`,
   assert.equal(
     parseReview("~~No actionable defects found.~~", "codex").status,
     "invalid",
+  );
+  assert.equal(
+    parseReview(
+      JSON.stringify({
+        findings: [],
+        overall_correctness: "patch is correct",
+        overall_explanation: "No defects found.",
+        overall_confidence_score: 0.99,
+      }),
+      "codex",
+    ).status,
+    "clean",
+  );
+  const structuredFinding = parseReview(
+    JSON.stringify({
+      findings: [
+        {
+          title: "[P1] Preserve retry errors",
+          body: "The error is discarded.",
+          confidence_score: 0.95,
+          priority: 1,
+          code_location: {
+            absolute_file_path: "/tmp/retry.js",
+            line_range: { start: 4, end: 5 },
+          },
+        },
+      ],
+      overall_correctness: "patch is incorrect",
+      overall_explanation: "The retry path is broken.",
+      overall_confidence_score: 0.95,
+    }),
+    "codex",
+  );
+  assert.equal(structuredFinding.status, "findings");
+  assert.equal(structuredFinding.findings[0].priority, "P1");
+  assert.equal(structuredFinding.findings[0].title, "Preserve retry errors");
+  assert.equal(
+    parseReview(
+      "Review comment:\n\n- [P2] Preserve retry errors — /tmp/retry.js:4-5\n  The error is discarded.",
+      "codex",
+    ).status,
+    "findings",
   );
 });
 
@@ -685,6 +728,16 @@ test("Codex config reads reject oversized and non-regular inputs", (t) => {
 });
 
 test("Codex feature probing adapts to supported flags and fails closed", () => {
+  assert.equal(codexPreflightTimeout({}), 60_000);
+  assert.equal(
+    codexPreflightTimeout({ CODEX_REVIEW_LOOP_TIMEOUT_MS: "2500" }),
+    2_500,
+  );
+  assert.throws(
+    () => codexPreflightTimeout({ CODEX_REVIEW_LOOP_TIMEOUT_MS: "forever" }),
+    /timeout must be an integer/u,
+  );
+
   const cloudBundle = parseCodexCloudBundleCache(
     JSON.stringify({
       signed_payload: {
@@ -908,7 +961,7 @@ obsolete_external_tool             removed            true
   );
 
   const mergedProfileMcpServers = [];
-  codexFeaturesForReview(
+  const mergedProfileFeatures = codexFeaturesForReview(
     {
       root: "/tmp/repository",
       isolateCodexConfig: true,
@@ -943,9 +996,27 @@ obsolete_external_tool             removed            true
         requirementsConfigs: [],
       },
       mcpServers: mergedProfileMcpServers,
+      preferenceContext: {
+        userConfig: {
+          contents: '[profiles.work]\nmodel = "gpt-profile"',
+          file: "user config",
+        },
+      },
     },
   );
   assert.deepEqual(mergedProfileMcpServers, ["reader"]);
+  assert.equal(mergedProfileFeatures.selectedLegacyProfile, "work");
+  assert.deepEqual(
+    codexReviewPreferencesFromToml(
+      '[profiles.work]\nmodel = "gpt-profile"',
+      "user config",
+      {
+        legacyProfiles: true,
+        selectedLegacyProfile: mergedProfileFeatures.selectedLegacyProfile,
+      },
+    ),
+    { model: "gpt-profile" },
+  );
 
   const permissionProfileFeatures = codexFeaturesForReview(
     { root: "/tmp/repository", isolateCodexConfig: true },
@@ -1528,6 +1599,24 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     env,
     "check-commit-message",
     "--subject",
+    "Preserve finding metadata",
+    "--body",
+    "Changes created from AI-generated review feedback.",
+    "--policy",
+    "Repository-specific commit format",
+    "--policy-overrides",
+    "all",
+    "--product-terms",
+    "The repository implements reviewer-provider behavior",
+  );
+  assert.equal(result.status, 2);
+  assert.match(result.stdout, /AI-workflow attribution/u);
+
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
     "Describe commit metadata",
     "--body",
     "Reviewer-generated commits retain metadata.",
@@ -1601,6 +1690,17 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     assert.equal(result.status, 2, `${trailer}\n${result.stdout}`);
     assert.match(result.stdout, /AI attribution trailer/u);
   }
+
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
+    "Preserve contributor certification",
+    "--body",
+    `${narrativeCommitBody}\n\nSigned-off-by: Alice <alice@openai.com>`,
+  );
+  assert.equal(result.status, 0, result.stdout);
 
   result = invoke(
     directory,

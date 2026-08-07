@@ -29,6 +29,7 @@ const CLEAN_SENTINEL = "NO_IN_SCOPE_FUNCTIONAL_FINDINGS";
 const STATE_SCHEMA_VERSION = 3;
 const DEFAULT_FALLBACK_MAX_ROUNDS = 15;
 const DEFAULT_TIMEOUT_MS = 1_200_000;
+const MAX_CODEX_PREFLIGHT_TIMEOUT_MS = 60_000;
 const MAX_CAPTURE_BYTES = 64 * 1024 * 1024;
 const MAX_CODEX_CONFIG_BYTES = 1024 * 1024;
 const MAX_CODEX_IDENTITY_BYTES = 4 * 1024 * 1024;
@@ -86,6 +87,7 @@ function run(command, args, options = {}) {
     env: options.env ?? process.env,
     input: options.input,
     maxBuffer: MAX_CAPTURE_BYTES,
+    timeout: options.timeoutMs,
     stdio: ["pipe", "pipe", "pipe"],
   });
   if (result.error) {
@@ -561,8 +563,8 @@ function codexAvailability(env, context = undefined) {
   };
   try {
     const mcpServers = codexMcpServersForReview(state, env);
-    codexReviewPreferencesForReview(state, env);
-    codexFeaturesForReview(
+    const preferenceContext = codexReviewPreferenceContext(state, env);
+    const disabledFeatures = codexFeaturesForReview(
       state,
       env,
       context?.storage,
@@ -571,6 +573,16 @@ function codexAvailability(env, context = undefined) {
       {
         localConfigInventory: mcpServers.localConfigInventory,
         mcpServers,
+        preferenceContext,
+      },
+    );
+    codexReviewPreferencesForReview(
+      state,
+      env,
+      undefined,
+      {
+        preferenceContext,
+        selectedLegacyProfile: disabledFeatures.selectedLegacyProfile,
       },
     );
     return { available: true };
@@ -1798,14 +1810,13 @@ function configuredCodexAuthOverrides(state, env) {
   );
 }
 
-function configuredCodexReviewPreferences(state, env) {
-  if (state.isolateCodexConfig) return {};
+function codexReviewPreferenceContext(state, env) {
+  if (state.isolateCodexConfig) return null;
   const userConfig = codexConfigFile(path.join(codexHome(env), "config.toml"));
-  if (!userConfig) return {};
+  if (!userConfig) return null;
   const legacyProfiles = codexUsesLegacyProfiles(state, env);
-  let selectedLegacyProfile = null;
+  const configs = [];
   if (legacyProfiles) {
-    const configs = [];
     const systemConfig = codexConfigFile(codexSystemConfig(env));
     if (systemConfig) configs.push(systemConfig);
     configs.push(userConfig);
@@ -1820,12 +1831,26 @@ function configuredCodexReviewPreferences(state, env) {
         file: "managed Codex preferences",
       });
     }
-    selectedLegacyProfile = codexSelectedLegacyProfileFromConfigs(configs);
   }
+  return { userConfig, legacyProfiles, configs };
+}
+
+function configuredCodexReviewPreferences(state, env, options = {}) {
+  const context =
+    options.preferenceContext ?? codexReviewPreferenceContext(state, env);
+  if (!context) return {};
+  const selectedLegacyProfile = Object.hasOwn(
+    options,
+    "selectedLegacyProfile",
+  )
+    ? options.selectedLegacyProfile
+    : context.legacyProfiles
+      ? codexSelectedLegacyProfileFromConfigs(context.configs)
+      : null;
   return codexReviewPreferencesFromToml(
-    userConfig.contents,
-    userConfig.file,
-    { legacyProfiles, selectedLegacyProfile },
+    context.userConfig.contents,
+    context.userConfig.file,
+    { legacyProfiles: context.legacyProfiles, selectedLegacyProfile },
   );
 }
 
@@ -1841,8 +1866,9 @@ export function codexReviewPreferencesForReview(
   state,
   env,
   inventory = configuredCodexReviewPreferences,
+  options = {},
 ) {
-  return inventory(state, env);
+  return inventory(state, env, options);
 }
 
 export function parseCodexFeatureList(output) {
@@ -1875,6 +1901,7 @@ function runCodexFeatureList(root, env, disabledFeatures = []) {
     cwd: root,
     env,
     allowFailure: true,
+    timeoutMs: codexPreflightTimeout(env),
   });
   if (result.status !== 0) {
     const detail = (result.stderr || result.stdout).trim();
@@ -1884,6 +1911,19 @@ function runCodexFeatureList(root, env, disabledFeatures = []) {
     );
   }
   return parseCodexFeatureList(result.stdout);
+}
+
+export function codexPreflightTimeout(env) {
+  return Math.min(
+    integerOption(
+      env.CODEX_REVIEW_LOOP_TIMEOUT_MS,
+      DEFAULT_TIMEOUT_MS,
+      "timeout",
+      1_000,
+      86_400_000,
+    ),
+    MAX_CODEX_PREFLIGHT_TIMEOUT_MS,
+  );
 }
 
 function copyCodexIdentityForProbe(state, sourceEnv, temporaryHome) {
@@ -2055,6 +2095,7 @@ function runCodexManagedConfigProbe(
     cwd: root,
     env,
     allowFailure: true,
+    timeoutMs: codexPreflightTimeout(env),
   });
   const detail = `${result.stderr}\n${result.stdout}`;
   if (
@@ -2081,8 +2122,10 @@ function assertCloudCodexConfigurationSafe(
   const ordinaryConfigs = localInventory.ordinaryConfigs ?? [];
   const managedConfigs = localInventory.managedConfigs ?? [];
   const requirementsConfigs = localInventory.requirementsConfigs ?? [];
+  const userPreferenceConfig = reviewOptions.preferenceContext?.userConfig;
   const mergedConfigs = [
     ...ordinaryConfigs,
+    ...(userPreferenceConfig ? [userPreferenceConfig] : []),
     ...managedConfigs,
     ...cloudConfigs,
   ];
@@ -2148,7 +2191,7 @@ function assertCloudCodexConfigurationSafe(
       ...[...mcpNames].sort(),
     );
   }
-  return [
+  const usesReadOnlyDefaultPermissions = [
     ...ordinaryConfigs,
     ...managedConfigs,
     ...requirementsConfigs,
@@ -2161,6 +2204,7 @@ function assertCloudCodexConfigurationSafe(
       configOptions,
     ),
   );
+  return { selectedLegacyProfile, usesReadOnlyDefaultPermissions };
 }
 
 export function codexFeaturesForReview(
@@ -2204,7 +2248,7 @@ export function codexFeaturesForReview(
       disabled,
       authOverrides,
     );
-    const usesReadOnlyDefaultPermissions = assertCloudCodexConfigurationSafe(
+    const configuration = assertCloudCodexConfigurationSafe(
       state,
       probeEnv,
       authenticated,
@@ -2213,7 +2257,9 @@ export function codexFeaturesForReview(
     retained = Boolean(options.retainHome);
     return withCodexIsolationMetadata(disabled, {
       codexHome: retained ? temporaryHome : null,
-      usesReadOnlyDefaultPermissions,
+      selectedLegacyProfile: configuration.selectedLegacyProfile,
+      usesReadOnlyDefaultPermissions:
+        configuration.usesReadOnlyDefaultPermissions,
       authOverrides,
     });
   } finally {
@@ -2272,7 +2318,7 @@ function providerInvocation(state, prompt, env, repo) {
   switch (state.provider) {
     case "codex": {
       const mcpServers = codexMcpServersForReview(state, env);
-      const preferences = codexReviewPreferencesForReview(state, env);
+      const preferenceContext = codexReviewPreferenceContext(state, env);
       const disabledFeatures = codexFeaturesForReview(
         state,
         env,
@@ -2283,10 +2329,20 @@ function providerInvocation(state, prompt, env, repo) {
           retainHome: true,
           localConfigInventory: mcpServers.localConfigInventory,
           mcpServers,
+          preferenceContext,
         },
       );
       const temporaryHome = disabledFeatures.codexHome;
       try {
+        const preferences = codexReviewPreferencesForReview(
+          state,
+          env,
+          undefined,
+          {
+            preferenceContext,
+            selectedLegacyProfile: disabledFeatures.selectedLegacyProfile,
+          },
+        );
         return {
           command: "codex",
           args: codexReviewArgs(
@@ -2477,12 +2533,91 @@ function containsCodexCleanVerdict(text) {
     .some((line) => codexExplicitClean(normalizeCodexCleanLine(line)));
 }
 
+function parseCodexStructuredReview(text) {
+  if (!text.startsWith("{")) return null;
+  let value;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (
+    !value ||
+    typeof value !== "object" ||
+    !Array.isArray(value.findings) ||
+    !["patch is correct", "patch is incorrect"].includes(
+      value.overall_correctness,
+    )
+  ) {
+    return {
+      status: "invalid",
+      findings: [],
+      reason: "Codex returned an invalid structured review object.",
+    };
+  }
+  const findings = [];
+  for (const finding of value.findings) {
+    const priority = finding?.priority;
+    const location = finding?.code_location;
+    const range = location?.line_range;
+    if (
+      !finding ||
+      typeof finding.title !== "string" ||
+      typeof finding.body !== "string" ||
+      !Number.isInteger(priority) ||
+      priority < 0 ||
+      priority > 3 ||
+      typeof location?.absolute_file_path !== "string" ||
+      !Number.isInteger(range?.start) ||
+      !Number.isInteger(range?.end) ||
+      range.start < 1 ||
+      range.end < range.start
+    ) {
+      return {
+        status: "invalid",
+        findings: [],
+        reason: "Codex returned an invalid structured review finding.",
+      };
+    }
+    const title = finding.title.replace(/^\[P[0-3]\]\s*/u, "").trim();
+    findings.push({
+      priority: `P${priority}`,
+      title,
+      file: location.absolute_file_path,
+      line: range.start,
+      endLine: range.end,
+      key: `${title.toLowerCase()}|${location.absolute_file_path.toLowerCase()}:${range.start}`,
+    });
+  }
+  if (
+    findings.length === 0 &&
+    value.overall_correctness === "patch is correct"
+  ) {
+    return { status: "clean", findings: [] };
+  }
+  if (
+    findings.length > 0 &&
+    value.overall_correctness === "patch is incorrect"
+  ) {
+    return { status: "findings", findings };
+  }
+  return {
+    status: "invalid",
+    findings,
+    reason: "Codex structured findings contradict the overall correctness verdict.",
+  };
+}
+
 export function parseReview(output, provider = "custom") {
   const text = output.trim();
+  if (provider === "codex") {
+    const structured = parseCodexStructuredReview(text);
+    if (structured) return structured;
+  }
   const hasSentinel = text
     .split(/\r?\n/u)
     .some((line) => line.trim() === CLEAN_SENTINEL);
-  const heading = /^Full review comments:\s*$/imu.test(text);
+  const heading = /^(?:Full review comments|Review comment):\s*$/imu.test(text);
   const prioritySyntax = /^\s*-\s+\[P[0-3]\]/imu.test(text);
   const findings = [];
   const pattern =
@@ -2877,9 +3012,14 @@ const WORKFLOW_ATTRIBUTION_PATTERNS = [
   /\breview(?:er)?[ -]?round\s*#?\d+\b/iu,
 ];
 
+const PRODUCT_PROVENANCE_SOURCE = String.raw`\b(?:ai|llm|reviewer|codex|claude|gemini|chatgpt|gpt(?:-\d+(?:\.\d+)*)?|openai|anthropic|opencode|(?:github\s+)?copilot)[\s-]+(?:generated|authored|written|created|produced)\s+(?:review\s+)?(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance|reviews?|outputs?|results?|reports?|metadata|artifacts?|records?|events?|diagnostics?)\b`;
 const PRODUCT_PROVENANCE_PATTERN = new RegExp(
-  String.raw`\b(?:ai|llm|reviewer|codex|claude|gemini|chatgpt|gpt(?:-\d+(?:\.\d+)*)?|openai|anthropic|opencode|(?:github\s+)?copilot)[\s-]+(?:generated|authored|written|created|produced)\s+(?:review\s+)?(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance|reviews?|outputs?|results?|reports?|metadata|artifacts?|records?|events?|diagnostics?)\b`,
+  PRODUCT_PROVENANCE_SOURCE,
   "giu",
+);
+const PRODUCT_PROVENANCE_CAUSAL_PATTERN = new RegExp(
+  String.raw`\b(?:changes?|code|implementation|commits?|patch)\b.{0,40}\b(?:created|made|produced|generated|authored|written|implemented)\s+(?:from|with|using|via|through|based\s+on)\s+${PRODUCT_PROVENANCE_SOURCE}`,
+  "iu",
 );
 
 function attributionProse(text, allowProductTerms) {
@@ -2888,6 +3028,12 @@ function attributionProse(text, allowProductTerms) {
 }
 
 function hasAttribution(text, allowProductTerms) {
+  if (
+    allowProductTerms &&
+    PRODUCT_PROVENANCE_CAUSAL_PATTERN.test(text)
+  ) {
+    return true;
+  }
   const prose = attributionProse(text, allowProductTerms);
   if (
     hasExplicitAiAuthorship(prose) ||
@@ -3085,9 +3231,12 @@ function hasAiAttributionTrailer(message) {
   const trailers = message.matchAll(
     /^[\t ]*(?:[-*]\s+)?[A-Za-z0-9][A-Za-z0-9-]*-(?:by|with)[\t ]*:(?<identity>.*)$/gimu,
   );
-  return [...trailers].some((trailer) =>
-    AI_ATTRIBUTION_IDENTITY.test(trailer.groups.identity),
-  );
+  return [...trailers].some((trailer) => {
+    const displayIdentity = trailer.groups.identity
+      .replace(/<[^<>]*>\s*$/u, "")
+      .trim();
+    return AI_ATTRIBUTION_IDENTITY.test(displayIdentity);
+  });
 }
 
 function inspectCommitMessageWithPolicy(subject, body, options) {
