@@ -309,6 +309,41 @@ ${formattedVerdict}`,
   );
   assert.equal(
     parseReview(
+      JSON.stringify({
+        findings: [],
+        overall_correctness: "patch is correct",
+        overall_explanation: "No unresolved issues remain.",
+        overall_confidence_score: 0.99,
+      }),
+      "codex",
+    ).status,
+    "clean",
+  );
+  assert.equal(
+    parseReview(
+      JSON.stringify({
+        findings: [
+          {
+            title: 42,
+            body: "The retry path is broken.",
+            confidence_score: 0.9,
+            priority: 1,
+            code_location: {
+              absolute_file_path: "/tmp/retry.js",
+              line_range: { start: 7, end: 7 },
+            },
+          },
+        ],
+        overall_correctness: "patch is incorrect",
+        overall_explanation: "One defect remains.",
+        overall_confidence_score: 0.9,
+      }),
+      "codex",
+    ).status,
+    "invalid",
+  );
+  assert.equal(
+    parseReview(
       "Review comment:\n\n- [P2] Preserve retry errors — /tmp/retry.js:4-5\n  The error is discarded.",
       "codex",
     ).status,
@@ -348,6 +383,8 @@ test("Codex preserves allowlisted preferences and has no default round cap", () 
     "hooks",
     "--disable",
     "multi_agent",
+    "-c",
+    'web_search="disabled"',
     "-c",
     "notify=[]",
     "review",
@@ -488,6 +525,14 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
   assert.deepEqual(
     codexManagedHazardsFromToml('default_permissions = ":read-only"'),
     [],
+  );
+  assert.deepEqual(
+    codexManagedHazardsFromToml('web_search = "disabled"'),
+    [],
+  );
+  assert.deepEqual(
+    codexManagedHazardsFromToml('web_search = "live"'),
+    ["web_search"],
   );
   assert.deepEqual(
     codexManagedHazardsFromToml(
@@ -690,6 +735,18 @@ default_permissions = ":read-only"
       'allowed_approval_policies = ["on-request"]',
     ),
     ["allowed_approval_policies"],
+  );
+  assert.deepEqual(
+    codexRequirementsHazardsFromToml(
+      'allowed_web_search_modes = ["disabled", "cached"]',
+    ),
+    [],
+  );
+  assert.deepEqual(
+    codexRequirementsHazardsFromToml(
+      'allowed_web_search_modes = ["live"]',
+    ),
+    ["allowed_web_search_modes"],
   );
   assert.deepEqual(
     codexRequirementsHazardsFromToml(
@@ -1084,7 +1141,7 @@ obsolete_external_tool             removed            true
   );
 
   const userIgnoredMcpServers = [];
-  codexFeaturesForReview(
+  const separatedProfileFeatures = codexFeaturesForReview(
     {
       root: "/tmp/repository",
       isolateCodexConfig: false,
@@ -1128,6 +1185,23 @@ obsolete_external_tool             removed            true
     },
   );
   assert.deepEqual(userIgnoredMcpServers, ["writer"]);
+  assert.equal(separatedProfileFeatures.selectedLegacyProfile, "danger");
+  assert.equal(
+    separatedProfileFeatures.selectedLegacyPreferenceProfile,
+    "safe",
+  );
+  assert.deepEqual(
+    codexReviewPreferencesFromToml(
+      'profile = "safe"\n[profiles.safe]\nmodel = "gpt-profile"',
+      "user config",
+      {
+        legacyProfiles: true,
+        selectedLegacyProfile:
+          separatedProfileFeatures.selectedLegacyPreferenceProfile,
+      },
+    ),
+    { model: "gpt-profile" },
+  );
 
   assert.throws(
     () =>

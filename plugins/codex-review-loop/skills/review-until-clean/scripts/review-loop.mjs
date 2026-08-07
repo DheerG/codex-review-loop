@@ -584,7 +584,8 @@ function codexAvailability(env, context = undefined) {
       undefined,
       {
         preferenceContext,
-        selectedLegacyProfile: disabledFeatures.selectedLegacyProfile,
+        selectedLegacyProfile:
+          disabledFeatures.selectedLegacyPreferenceProfile,
       },
     );
     return { available: true };
@@ -1355,6 +1356,10 @@ export function codexManagedHazardsFromToml(
       // Unprefixed permission names may resolve to a user-defined profile.
       // Only Codex's built-in read-only profile is safe to accept here.
       if (value !== ":read-only") hazards.add(parts[0]);
+    } else if (parts.length === 1 && parts[0] === "web_search") {
+      if (tomlStringValue(record.value ?? "", source) !== "disabled") {
+        hazards.add(parts[0]);
+      }
     } else if (
       parts[0] === "projects" &&
       parts.at(-1) === "trust_level" &&
@@ -1431,6 +1436,13 @@ export function codexRequirementsHazardsFromToml(
       key === "allowed_sandbox_modes"
     ) {
       if (!tomlStringArrayValue(record.value ?? "", source).includes("read-only")) {
+        hazards.add(key);
+      }
+    } else if (
+      record.parts.length === 1 &&
+      key === "allowed_web_search_modes"
+    ) {
+      if (!tomlStringArrayValue(record.value ?? "", source).includes("disabled")) {
         hazards.add(key);
       }
     } else if (record.parts.length === 1 && key === "default_permissions") {
@@ -2127,6 +2139,8 @@ function runCodexManagedConfigProbe(
   for (const feature of disabledFeatures) args.push("--disable", feature);
   args.push(
     "-c",
+    'web_search="disabled"',
+    "-c",
     "notify=[]",
     "--ephemeral",
     "--output-schema",
@@ -2164,10 +2178,12 @@ function assertCloudCodexConfigurationSafe(
   const ordinaryConfigs = localInventory.ordinaryConfigs ?? [];
   const managedConfigs = localInventory.managedConfigs ?? [];
   const requirementsConfigs = localInventory.requirementsConfigs ?? [];
+  const userPreferenceConfig = reviewOptions.preferenceContext?.userConfig;
+  const cloudConfigsByPrecedence = [...cloudConfigs].reverse();
   const mergedConfigs = [
     ...ordinaryConfigs,
     ...managedConfigs,
-    ...[...cloudConfigs].reverse(),
+    ...cloudConfigsByPrecedence,
   ];
   const legacyProfiles =
     mergedConfigs.length === 0
@@ -2177,6 +2193,14 @@ function assertCloudCodexConfigurationSafe(
         : codexUsesLegacyProfiles(state, env);
   const selectedLegacyProfile = legacyProfiles
     ? codexSelectedLegacyProfileFromConfigs(mergedConfigs)
+    : null;
+  const selectedLegacyPreferenceProfile = legacyProfiles
+    ? codexSelectedLegacyProfileFromConfigs([
+        ...ordinaryConfigs,
+        ...(userPreferenceConfig ? [userPreferenceConfig] : []),
+        ...managedConfigs,
+        ...cloudConfigsByPrecedence,
+      ])
     : null;
   const configOptions = { legacyProfiles, selectedLegacyProfile };
   const mcpNames = new Set(reviewOptions.mcpServers ?? []);
@@ -2244,7 +2268,11 @@ function assertCloudCodexConfigurationSafe(
       configOptions,
     ),
   );
-  return { selectedLegacyProfile, usesReadOnlyDefaultPermissions };
+  return {
+    selectedLegacyProfile,
+    selectedLegacyPreferenceProfile,
+    usesReadOnlyDefaultPermissions,
+  };
 }
 
 export function codexFeaturesForReview(
@@ -2301,6 +2329,8 @@ export function codexFeaturesForReview(
     return withCodexIsolationMetadata(disabled, {
       codexHome: retained ? temporaryHome : null,
       selectedLegacyProfile: configuration.selectedLegacyProfile,
+      selectedLegacyPreferenceProfile:
+        configuration.selectedLegacyPreferenceProfile,
       usesReadOnlyDefaultPermissions:
         configuration.usesReadOnlyDefaultPermissions,
       authOverrides,
@@ -2348,6 +2378,8 @@ export function codexReviewArgs(
   for (const feature of disabledFeatures) args.push("--disable", feature);
   args.push(
     "-c",
+    'web_search="disabled"',
+    "-c",
     "notify=[]",
     ...(mcpOverride ? ["-c", mcpOverride] : []),
     "review",
@@ -2383,7 +2415,8 @@ function providerInvocation(state, prompt, env, repo) {
           undefined,
           {
             preferenceContext,
-            selectedLegacyProfile: disabledFeatures.selectedLegacyProfile,
+            selectedLegacyProfile:
+              disabledFeatures.selectedLegacyPreferenceProfile,
           },
         );
         return {
@@ -2606,7 +2639,9 @@ function parseCodexStructuredReview(text) {
   }
   const findings = [];
   for (const finding of value.findings) {
-    const titlePriority = finding?.title?.match(/^\[P([0-3])\]\s*/u);
+    const title =
+      typeof finding?.title === "string" ? finding.title : null;
+    const titlePriority = title?.match(/^\[P([0-3])\]\s*/u);
     const declaredPriority = finding?.priority;
     const priority =
       declaredPriority === undefined || declaredPriority === null
@@ -2618,7 +2653,7 @@ function parseCodexStructuredReview(text) {
     const range = location?.line_range;
     if (
       !finding ||
-      typeof finding.title !== "string" ||
+      title === null ||
       typeof finding.body !== "string" ||
       typeof finding.confidence_score !== "number" ||
       !Number.isFinite(finding.confidence_score) ||
@@ -2640,14 +2675,14 @@ function parseCodexStructuredReview(text) {
         reason: "Codex returned an invalid structured review finding.",
       };
     }
-    const title = finding.title.replace(/^\[P[0-3]\]\s*/u, "").trim();
+    const normalizedTitle = title.replace(/^\[P[0-3]\]\s*/u, "").trim();
     findings.push({
       priority: `P${priority}`,
-      title,
+      title: normalizedTitle,
       file: location.absolute_file_path,
       line: range.start,
       endLine: range.end,
-      key: `${title.toLowerCase()}|${location.absolute_file_path.toLowerCase()}:${range.start}`,
+      key: `${normalizedTitle.toLowerCase()}|${location.absolute_file_path.toLowerCase()}:${range.start}`,
     });
   }
   if (
@@ -2674,7 +2709,7 @@ function parseCodexStructuredReview(text) {
 function codexExplanationClaimsFinding(explanation) {
   const prose = explanation
     .replace(
-      /\b(?:no|without(?:\s+any)?|free\s+(?:of|from))\s+(?:(?:in-scope|actionable|material)\s+)?(?:findings?|defects?|issues?|bugs?|problems?|regressions?|vulnerabilities|errors?)\b/giu,
+      /\b(?:no|without(?:\s+any)?|free\s+(?:of|from))\s+(?:(?:in-scope|actionable|material|remaining|unresolved)\s+)*(?:findings?|defects?|issues?|bugs?|problems?|regressions?|vulnerabilities|errors?)\b/giu,
       "",
     )
     .replace(
@@ -2682,7 +2717,7 @@ function codexExplanationClaimsFinding(explanation) {
       "",
     );
   return [
-    /\b(?:findings?|defects?|issues?|bugs?|problems?|regressions?|vulnerabilities|errors?)\s+(?:still\s+)?(?:remain|exist|persist|(?:was|were)\s+(?:found|identified)|(?:is|are)\s+present)\b/iu,
+    /\b(?:findings?|defects?|issues?|bugs?|problems?|regressions?|vulnerabilities|errors?)\s+(?:still\s+)?(?:remains?|exists?|persists?|(?:was|were)\s+(?:found|identified)|(?:is|are)\s+present)\b/iu,
     /\b(?:remaining|unresolved|actionable)\s+(?:finding|defect|issue|bug|problem|regression|vulnerability|error)s?\b/iu,
     /\bthere\s+(?:is|are)\s+(?:(?:an?|one|two|three|\d+)\s+)?(?:(?:actionable|material)\s+)?(?:finding|defect|issue|bug|problem|regression|vulnerability|error)s?\b/iu,
     /\b(?:patch|change|implementation|behavior|behaviour|path)\b.{0,40}\b(?:is|are|remains?|appears?|seems?)\s+(?:broken|incorrect|unsafe|faulty|defective)\b/iu,
