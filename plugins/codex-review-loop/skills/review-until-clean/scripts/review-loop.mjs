@@ -1231,37 +1231,92 @@ function effectiveCodexRecordsFromConfigs(configs, options = {}) {
   return [...effective.values()];
 }
 
-function codexIsolatedTransportDependencies(records, source) {
+function codexTransportState(records, source) {
   let modelProvider = "openai";
-  let modelCatalog = false;
-  let openAiBaseUrl = false;
-  const configuredProviders = new Set();
+  let modelProviderExplicit = false;
+  let modelCatalog = null;
+  let openAiBaseUrl = null;
+  const configuredProviders = new Map();
+  const providerAncestors = new Set();
+  for (const record of records) {
+    if (record.parts[0] !== "model_providers" || !record.parts[1]) continue;
+    for (let length = 2; length < record.parts.length; length += 1) {
+      providerAncestors.add(JSON.stringify(record.parts.slice(0, length)));
+    }
+  }
   for (const record of records) {
     if (record.parts.length === 1 && record.parts[0] === "model_provider") {
       modelProvider = tomlStringValue(record.value ?? "", source);
+      modelProviderExplicit = true;
     } else if (
       record.parts.length === 1 &&
       record.parts[0] === "model_catalog_json"
     ) {
-      modelCatalog = true;
+      modelCatalog = tomlStringValue(record.value ?? "", source);
     } else if (
       record.parts.length === 1 &&
       record.parts[0] === "openai_base_url"
     ) {
-      openAiBaseUrl = true;
+      openAiBaseUrl = tomlStringValue(record.value ?? "", source);
     } else if (record.parts[0] === "model_providers" && record.parts[1]) {
-      configuredProviders.add(record.parts[1]);
+      const provider = record.parts[1];
+      if (providerAncestors.has(JSON.stringify(record.parts))) continue;
+      if (!configuredProviders.has(provider)) {
+        configuredProviders.set(provider, new Map());
+      }
+      configuredProviders
+        .get(provider)
+        .set(JSON.stringify(record.parts.slice(2)), record.value?.trim() ?? "");
     }
   }
+  return {
+    configuredProviders,
+    modelCatalog,
+    modelProvider,
+    modelProviderExplicit,
+    openAiBaseUrl,
+  };
+}
+
+function codexTransportMapsEqual(left = new Map(), right = new Map()) {
+  if (left.size !== right.size) return false;
+  for (const [key, value] of left) {
+    if (right.get(key) !== value) return false;
+  }
+  return true;
+}
+
+function codexIsolatedTransportDependencies(
+  records,
+  isolatedRecords,
+  source,
+) {
+  const current = codexTransportState(records, source);
+  const isolated = codexTransportState(isolatedRecords, source);
   const dependencies = [];
-  if (modelProvider !== "openai") {
-    dependencies.push(`model_provider=${JSON.stringify(modelProvider)}`);
+  if (
+    current.modelProvider !== isolated.modelProvider &&
+    !(current.modelProvider === "openai" && current.modelProviderExplicit)
+  ) {
+    dependencies.push("model_provider");
   }
-  if (configuredProviders.has("openai")) {
-    dependencies.push("model_providers.openai");
+  if (current.modelCatalog !== isolated.modelCatalog) {
+    dependencies.push("model_catalog_json");
   }
-  if (openAiBaseUrl) dependencies.push("openai_base_url");
-  if (modelCatalog) dependencies.push("model_catalog_json");
+  if (
+    !codexTransportMapsEqual(
+      current.configuredProviders.get(current.modelProvider),
+      isolated.configuredProviders.get(current.modelProvider),
+    )
+  ) {
+    dependencies.push(`model_providers.${current.modelProvider}`);
+  }
+  if (
+    current.modelProvider === "openai" &&
+    current.openAiBaseUrl !== isolated.openAiBaseUrl
+  ) {
+    dependencies.push("openai_base_url");
+  }
   return dependencies;
 }
 
@@ -1294,7 +1349,12 @@ function codexReviewPreferencesFromRecords(records, source, options = {}) {
       );
     }
   }
-  if (preferences.model || preferences.review_model || modelProvider === "openai") {
+  if (
+    preferences.model ||
+    preferences.review_model ||
+    modelProvider === "openai" ||
+    (options.isolatedTransportDependencies?.length ?? 0) > 0
+  ) {
     const dependencies = [];
     const effectiveModelProvider = modelProvider ?? "openai";
     if (configuredModelProviders.get(effectiveModelProvider) === false) {
@@ -1360,6 +1420,7 @@ export function codexReviewPreferencesFromConfigs(
   source = "layered Codex configuration",
   options = {},
 ) {
+  const records = effectiveCodexRecordsFromConfigs(configs, options);
   let isolatedTransportDependencies = [];
   if (
     options.legacyProfiles &&
@@ -1378,12 +1439,13 @@ export function codexReviewPreferencesFromConfigs(
       },
     );
     isolatedTransportDependencies = codexIsolatedTransportDependencies(
+      records,
       retainedRecords,
       `${source} isolated profile`,
     );
   }
   return codexReviewPreferencesFromRecords(
-    effectiveCodexRecordsFromConfigs(configs, options),
+    records,
     source,
     { isolatedTransportDependencies },
   );
@@ -3776,7 +3838,6 @@ function hasUnambiguousShellSyntax(text) {
 
 function isCommitSectionBoundary(line) {
   let heading = line.trim();
-  if (/^#{1,6}\s+\S.*$/u.test(heading)) return true;
   let previous;
   do {
     previous = heading;
@@ -3789,7 +3850,10 @@ function isCommitSectionBoundary(line) {
     heading = emphasized[2];
     emphasized = heading.match(/^(\*\*|__|\*|_)(.+)\1$/u);
   }
-  return /^[A-Za-z][^:\r\n]{0,80}:$/u.test(heading);
+  return (
+    /^#{1,6}\s+\S.*$/u.test(heading) ||
+    /^[A-Za-z][^:\r\n]{0,80}:$/u.test(heading)
+  );
 }
 
 function verificationEvidenceLines(
@@ -3810,15 +3874,16 @@ function verificationEvidenceLines(
       commandContinues = false;
       continue;
     }
-    if (isCommitSectionBoundary(line)) {
+    const acceptsEvidence = anySection || section === "Verification";
+    if (acceptsEvidence && isVerbatimVerificationCommand(line)) {
+      evidence.add(index);
+      commandContinues = hasShellContinuationMarker(line);
+    } else if (isCommitSectionBoundary(line)) {
       section = null;
       commandContinues = false;
       continue;
-    }
-    if (!anySection && section !== "Verification") continue;
-    if (isVerbatimVerificationCommand(line)) {
-      evidence.add(index);
-      commandContinues = hasShellContinuationMarker(line);
+    } else if (!acceptsEvidence) {
+      continue;
     } else if (
       commandContinues &&
       /^\s+\S/u.test(line) &&
@@ -3834,7 +3899,11 @@ function verificationEvidenceLines(
 }
 
 function hasShellContinuationMarker(line) {
-  const trimmed = line.trimEnd();
+  let trimmed = line.trim();
+  const bullet = trimmed.match(/^[-*]\s+(.+)/u);
+  if (bullet) trimmed = bullet[1].trimEnd();
+  const codeSpan = trimmed.match(/^(`+)([\s\S]*)\1$/u);
+  if (codeSpan) trimmed = codeSpan[2].trimEnd();
   const trailingBackticks = trimmed.match(/`+$/u)?.[0].length ?? 0;
   const trailingBackslashes = trimmed.match(/\\+$/u)?.[0].length ?? 0;
   const trailingCarets = trimmed.match(/\^+$/u)?.[0].length ?? 0;

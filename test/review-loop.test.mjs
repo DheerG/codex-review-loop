@@ -956,6 +956,31 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
     ),
     { model: "private-review" },
   );
+  assert.deepEqual(
+    codexReviewPreferencesFromConfigs(
+      [
+        {
+          contents:
+            'profile = "system"\nmodel_provider = "openai"\nopenai_base_url = "https://shared.example.test"\nmodel_catalog_json = "/shared/models.json"\n[model_providers.openai]\nbase_url = "https://shared.example.test"',
+          file: "system config",
+          retainedForReview: true,
+        },
+        {
+          contents:
+            'profile = "user"\n[profiles.user]\nmodel = "user-model"',
+          file: "user config",
+          retainedForReview: false,
+        },
+      ],
+      "layered shared legacy transport",
+      {
+        legacyProfiles: true,
+        selectedLegacyProfile: "user",
+        retainedLegacyProfile: "system",
+      },
+    ),
+    { model: "user-model", model_provider: "openai" },
+  );
   assert.throws(
     () =>
       codexReviewPreferencesFromConfigs(
@@ -2290,6 +2315,9 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "> Notes:",
     "- **Notes:**",
     "> 2. _Notes:_",
+    "> ### Notes",
+    "- ### Notes",
+    "**### Notes**",
     "### Notes",
   ]) {
     result = invoke(
@@ -2304,6 +2332,20 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     assert.equal(result.status, 2, `${unknownHeading}\n${result.stdout}`);
     assert.match(result.stdout, /Verification.*exact command/u);
   }
+
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
+    "Preserve exact commands ending in colons",
+    "--body",
+    narrativeCommitBody.replace(
+      "- npm test -- retry\n- npm run validate",
+      "- npm run test:",
+    ),
+  );
+  assert.equal(result.status, 0, result.stderr);
 
   result = invoke(
     directory,
@@ -2395,6 +2437,7 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     '- $ echo "Reviewed by Codex"',
     "- $ echo Addressed Codex review feedback",
     '- `echo "Reviewed by Codex"`',
+    "- `npm test`\n  --message=Reviewed by Codex",
   ]) {
     result = invoke(
       directory,
