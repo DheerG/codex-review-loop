@@ -3203,25 +3203,37 @@ const WORKFLOW_ATTRIBUTION_PATTERNS = [
   /\breview(?:er)?[ -]?round\s*#?\d+\b/iu,
 ];
 
-const PRODUCT_PROVENANCE_SOURCE = String.raw`\b(?:ai|llm|reviewer|codex|claude|gemini|chatgpt|gpt(?:-\d+(?:\.\d+)*)?|openai|anthropic|opencode|(?:github\s+)?copilot)[\s-]+(?:generated|authored|written|created|produced)\s+(?:review\s+)?(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance|reviews?|outputs?|results?|reports?|metadata|artifacts?|records?|events?|diagnostics?)\b`;
-const PRODUCT_PROVENANCE_PATTERN = new RegExp(
+const PRODUCT_PROVENANCE_IDENTITY_SOURCE = String.raw`(?:ai|llm|reviewer|codex|claude|gemini|chatgpt|gpt(?:-\d+(?:\.\d+)*)?|openai|anthropic|opencode|(?:github\s+)?copilot)`;
+const PRODUCT_PROVENANCE_ARTIFACT_SOURCE = String.raw`(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance|reviews?|outputs?|results?|reports?|metadata|artifacts?|records?|events?|diagnostics?)`;
+const PRODUCT_PROVENANCE_SOURCE = String.raw`\b${PRODUCT_PROVENANCE_IDENTITY_SOURCE}[\s-]+(?:generated|authored|written|created|produced)\s+(?:review\s+)?${PRODUCT_PROVENANCE_ARTIFACT_SOURCE}\b`;
+const PASSIVE_PRODUCT_PROVENANCE_SOURCE = String.raw`\b${PRODUCT_PROVENANCE_ARTIFACT_SOURCE}\s+(?:generated|authored|written|created|produced)\s+by\s+(?:(?:an?|the)\s+)?${PRODUCT_PROVENANCE_IDENTITY_SOURCE}\b`;
+const PRODUCT_PROVENANCE_SOURCES = [
   PRODUCT_PROVENANCE_SOURCE,
-  "giu",
+  PASSIVE_PRODUCT_PROVENANCE_SOURCE,
+];
+const PRODUCT_PROVENANCE_PATTERNS = PRODUCT_PROVENANCE_SOURCES.map(
+  (source) => new RegExp(source, "giu"),
 );
-const PRODUCT_PROVENANCE_CAUSAL_PATTERN = new RegExp(
-  String.raw`\b(?:changes?|code|implementation|commits?|patch)\b.{0,40}\b(?:created|made|produced|generated|authored|written|implemented)\s+(?:from|with|using|via|through|based\s+on)\s+${PRODUCT_PROVENANCE_SOURCE}`,
-  "iu",
+const PRODUCT_PROVENANCE_CAUSAL_PATTERNS = PRODUCT_PROVENANCE_SOURCES.map(
+  (source) =>
+    new RegExp(
+      String.raw`\b(?:changes?|code|implementation|commits?|patch)\b.{0,40}(?:\b(?:created|made|produced|generated|authored|written|implemented)\s+)?(?:from|with|using|via|through|based\s+on)\s+${source}`,
+      "iu",
+    ),
 );
 
 function attributionProse(text, allowProductTerms) {
   if (!allowProductTerms) return text;
-  return text.replace(PRODUCT_PROVENANCE_PATTERN, "product artifact");
+  return PRODUCT_PROVENANCE_PATTERNS.reduce(
+    (prose, pattern) => prose.replace(pattern, "product artifact"),
+    text,
+  );
 }
 
 function hasAttribution(text, allowProductTerms) {
   if (
     allowProductTerms &&
-    PRODUCT_PROVENANCE_CAUSAL_PATTERN.test(text)
+    PRODUCT_PROVENANCE_CAUSAL_PATTERNS.some((pattern) => pattern.test(text))
   ) {
     return true;
   }
@@ -3265,11 +3277,7 @@ function commitSection(body, name) {
 function isVerbatimVerificationCommand(line) {
   const trimmed = line.trim();
   const bullet = trimmed.match(/^[-*]\s+(.+)/u);
-  return (
-    (bullet && isCommandShapedVerification(bullet[1])) ||
-    /^\$\s+\S/u.test(trimmed) ||
-    /^`[^`]+`$/u.test(trimmed)
-  );
+  return isCommandShapedVerification(bullet?.[1] ?? trimmed);
 }
 
 function hasWorkflowAttribution(text) {
@@ -3305,7 +3313,12 @@ function withoutLeadingEnvironmentAssignments(text) {
 }
 
 function isCommandShapedVerification(text) {
-  if (/^\$\s+\S/u.test(text) || /^`[^`]+`$/u.test(text)) return true;
+  const shellPrompt = text.match(/^\$\s+(.+)/u);
+  if (shellPrompt) return !startsWithWorkflowAttribution(shellPrompt[1]);
+  const markdownCommand = text.match(/^`([^`]+)`$/u);
+  if (markdownCommand) {
+    return !startsWithWorkflowAttribution(markdownCommand[1].trim());
+  }
   if (startsWithWorkflowAttribution(text)) return false;
   const command = withoutLeadingEnvironmentAssignments(text);
   const hasEnvironment = command !== text;
@@ -3419,7 +3432,7 @@ function longCommitProseLine(body) {
 }
 
 const AI_ATTRIBUTION_IDENTITY_SOURCE = String.raw`(?:ai|artificial intelligence|llm|language model|assistant|agent|bot|reviewer|codex|claude|gemini|chatgpt|gpt(?:-\d+(?:\.\d+)*)?|openai|anthropic|opencode|(?:github\s+)?copilot|cursor|windsurf|aider|devin|codeium|tabnine|qodo|amazon\s+q|sourcegraph\s+cody)`;
-const AI_AUTHORSHIP_ACTION_SOURCE = String.raw`(?:reviewed|generated|suggested|assisted|authored|co[ -]?authored|written|created|made|produced|programmed|pair[ -]?programmed|help(?:ed|s|ing)?(?:\s+(?:to\s+)?author)?)`;
+const AI_AUTHORSHIP_ACTION_SOURCE = String.raw`(?:reviewed|generated|suggested|assisted|authored|co[ -]?authored|written|created|made|produced|build(?:s|ing)?|built|implement(?:s|ed|ing)?|develop(?:s|ed|ing)?|programmed|pair[ -]?programmed|help(?:ed|s|ing)?(?:\s+(?:to\s+)?author)?)`;
 const AI_ATTRIBUTION_IDENTITY = new RegExp(
   String.raw`\b${AI_ATTRIBUTION_IDENTITY_SOURCE}\b`,
   "iu",
@@ -3450,6 +3463,10 @@ const PRODUCT_EXCEPTION_AI_AUTHORSHIP_PATTERNS = [
   ),
   new RegExp(
     String.raw`\b(?:pair[ -]?programmed|co[ -]?authored|authored|help(?:ed|s|ing)?\s+(?:to\s+)?author)\b.{0,50}\b(?:by|with|using|via|from)?\s*(?:(?:an?|the)\s+)?${AI_ATTRIBUTION_IDENTITY_SOURCE}\b`,
+    "iu",
+  ),
+  new RegExp(
+    String.raw`\b(?:built|implemented|developed)\b.{0,50}\b(?:by|with|using|via|from)\s+(?:(?:an?|the)\s+)?${AI_ATTRIBUTION_IDENTITY_SOURCE}\b`,
     "iu",
   ),
 ];
