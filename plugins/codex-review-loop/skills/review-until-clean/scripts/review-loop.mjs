@@ -3977,6 +3977,10 @@ const PRODUCT_PROVENANCE_PATTERNS = PRODUCT_PROVENANCE_SOURCES.map(
 const PRODUCT_PROVENANCE_CAUSAL_PATTERNS = PRODUCT_PROVENANCE_SOURCES.flatMap(
   (source) => [
     new RegExp(
+      String.raw`\b(?:changes?|code|implementation|commits?|patch|work)\b.{0,40}\b(?:address(?:es|ed|ing)?|appl(?:y|ies|ied|ying)|follow(?:s|ed|ing)?|incorporat(?:e|es|ed|ing)|reflect(?:s|ed|ing)?|resolv(?:e|es|ed|ing)|respond(?:s|ed|ing)?\s+to)\s+(?:the\s+)?${source}`,
+      "iu",
+    ),
+    new RegExp(
       String.raw`\b(?:changes?|code|implementation|commits?|patch)\b.{0,40}(?:\b(?:created|made|produced|generated|authored|written|implemented)\s+)?(?:from|with|using|via|through|based\s+on)\s+${source}`,
       "iu",
     ),
@@ -4206,6 +4210,27 @@ function shellCommandAfterOptions(text) {
   return null;
 }
 
+function npxCommandValue(command) {
+  const invocation = shellWordAndRest(command.trimStart());
+  if (!invocation || shellExecutableName(invocation.word) !== "npx") {
+    return null;
+  }
+  const match = invocation.rest.match(
+    /(?:^|\s)(?:-c|--call)(?:=|\s+)(?<value>"(?:\\.|[^"])*"|'[^']*')/u,
+  );
+  if (!match) return null;
+  const parsed = shellWordAndRest(match.groups.value);
+  if (!parsed || parsed.rest) return null;
+  const argsOffset = command.length - invocation.rest.length;
+  const valueOffset = match[0].indexOf(match.groups.value);
+  const start = argsOffset + match.index + valueOffset;
+  return {
+    command: parsed.word,
+    end: start + match.groups.value.length,
+    start,
+  };
+}
+
 const PACKAGE_OPTIONS_WITH_VALUES = new Set([
   "--cache",
   "--cwd",
@@ -4400,6 +4425,15 @@ function escapeRegularExpression(text) {
 function commandAttributionProse(text, allowProductTerms) {
   if (!allowProductTerms) return text;
   const { prefix, command } = shellCommandWithPrefix(text);
+  const nestedCommand = npxCommandValue(command);
+  if (nestedCommand) {
+    const nestedProse = commandAttributionProse(
+      nestedCommand.command,
+      allowProductTerms,
+    );
+    const expanded = `${command.slice(0, nestedCommand.start)} ${nestedProse} ${command.slice(nestedCommand.end)}`;
+    return attributionProse(`${prefix}${expanded}`, true);
+  }
   const selectorContext = testSelectorContext(command);
   let withoutSelectors = command;
   if (selectorContext) {
@@ -4633,6 +4667,9 @@ function isVerbatimVerificationContinuation(
 ) {
   const trimmed = line.trim();
   const option = /^--?[A-Za-z0-9][A-Za-z0-9_-]*(?:=|\s|$)/u.test(trimmed);
+  const operator = /^(?:&&|\|\||\||(?:\d*|&)?(?:>>?|<<?|<>|>\|))\s*\S/u.test(
+    trimmed,
+  );
   const attributionText = commandContext
     ? `${commandContext}\n${trimmed}`
     : trimmed;
@@ -4641,6 +4678,7 @@ function isVerbatimVerificationContinuation(
     (
       isCommandShapedVerification(trimmed, allowProductTerms) ||
       /^[A-Za-z][A-Za-z0-9]*-[A-Za-z][A-Za-z0-9]*(?:\s|$)/u.test(trimmed) ||
+      operator ||
       option ||
       /^(?:\.{0,2}[\\/])?[A-Za-z0-9_@+.-]+(?:[\\/][A-Za-z0-9_@+.-]+)+(?:\s|$)/u.test(trimmed) ||
       /^[A-Za-z0-9_@+-]+\.[A-Za-z0-9_.-]+(?:\s|$)/u.test(trimmed) ||

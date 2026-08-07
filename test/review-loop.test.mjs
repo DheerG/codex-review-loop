@@ -2719,6 +2719,7 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     '- jest -t "reject per reviewer feedback"',
     '- npx --yes jest -t "reject per reviewer feedback"',
     '- npx -p jest jest -t "reject per reviewer feedback"',
+    '- npx -c \'jest -t "reject per reviewer feedback"\'',
     '- go test -run "reject per reviewer feedback"',
     '- npm test -- --testNamePattern "reject per reviewer feedback"',
     '- npm --silent test -- --testNamePattern "per reviewer feedback"',
@@ -3039,6 +3040,23 @@ test("check-commit-message validates a proposed repair commit", (t) => {
   );
   assert.equal(result.status, 0, result.stderr);
 
+  for (const operatorContinuation of [
+    `  && node --test --test-name-pattern="${"operator-led verification evidence ".repeat(5).trim()}"`,
+    `  | node test/filter.mjs "${"pipeline verification evidence ".repeat(6).trim()}"`,
+    `  > ${"test/operator-verification-evidence-".repeat(5)}.log`,
+  ]) {
+    result = invoke(
+      directory,
+      env,
+      "check-commit-message",
+      "--subject",
+      "Preserve operator-led verification evidence",
+      "--body",
+      `${narrativeCommitBody}\n- npm test \\\n${operatorContinuation}`,
+    );
+    assert.equal(result.status, 0, `${operatorContinuation}\n${result.stdout}`);
+  }
+
   const longEnvironmentContinuation = `  BAR="${"preserve environment continuation ".repeat(5).trim()}" \\`;
   result = invoke(
     directory,
@@ -3248,6 +3266,10 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "AI wrote the parser.",
     "The parser was written by AI.",
     "The parser was created using AI.",
+    "Changes incorporate AI-generated findings.",
+    "Changes address AI-generated findings.",
+    "Changes follow AI-generated findings.",
+    "Changes reflect AI-generated findings.",
   ]) {
     result = invoke(
       directory,
