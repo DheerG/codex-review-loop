@@ -981,6 +981,31 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
     ),
     { model: "user-model", model_provider: "openai" },
   );
+  assert.deepEqual(
+    codexReviewPreferencesFromConfigs(
+      [
+        {
+          contents:
+            'profile = "system"\n[profiles.system]\nmodel_provider = "private"\n[profiles.system.model_providers.private]\nbase_url = "https://private.example.test"',
+          file: "system config",
+          retainedForReview: true,
+        },
+        {
+          contents:
+            'profile = "user"\n[profiles.user]\nmodel = "private-review"\nmodel_provider = "private"\n[profiles.user.model_providers.private]\nbase_url = "https://private.example.test"',
+          file: "user config",
+          retainedForReview: false,
+        },
+      ],
+      "layered equivalent legacy transport",
+      {
+        legacyProfiles: true,
+        selectedLegacyProfile: "user",
+        retainedLegacyProfile: "system",
+      },
+    ),
+    { model: "private-review" },
+  );
   assert.throws(
     () =>
       codexReviewPreferencesFromConfigs(
@@ -1841,9 +1866,14 @@ test(
     const bin = path.join(directory, "bin");
     mkdirSync(bin);
     const codex = path.join(bin, "codex");
+    const nativeCodex = path.join(directory, "native-codex.mjs");
+    writeFileSync(
+      nativeCodex,
+      'process.on("SIGTERM", () => {});\nAtomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);\n',
+    );
     writeFileSync(
       codex,
-      `#!${process.execPath}\nprocess.on("SIGTERM", () => {});\nAtomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);\n`,
+      `#!${process.execPath}\nconst { spawn } = require("node:child_process");\nconst child = spawn(process.execPath, [${JSON.stringify(nativeCodex)}], { stdio: "inherit" });\nchild.on("exit", (code) => process.exit(code ?? 1));\nprocess.stdin.resume();\n`,
     );
     chmodSync(codex, 0o755);
     const startedAt = Date.now();
@@ -1968,6 +1998,7 @@ test("isolated Codex feature probing skips user config without losing invocation
     assert.equal(existsSync(liveHome), true);
 
     const signalListeners = {
+      SIGHUP: process.listenerCount("SIGHUP"),
       SIGINT: process.listenerCount("SIGINT"),
       SIGTERM: process.listenerCount("SIGTERM"),
     };
@@ -1987,6 +2018,10 @@ test("isolated Codex feature probing skips user config without losing invocation
       );
       assert.equal(existsSync(retainedFeatures.codexHome), true);
       assert.equal(
+        process.listenerCount("SIGHUP"),
+        signalListeners.SIGHUP + 1,
+      );
+      assert.equal(
         process.listenerCount("SIGINT"),
         signalListeners.SIGINT + 1,
       );
@@ -1998,6 +2033,7 @@ test("isolated Codex feature probing skips user config without losing invocation
       retainedFeatures?.cleanupCodexHome();
     }
     assert.equal(existsSync(retainedFeatures.codexHome), false);
+    assert.equal(process.listenerCount("SIGHUP"), signalListeners.SIGHUP);
     assert.equal(process.listenerCount("SIGINT"), signalListeners.SIGINT);
     assert.equal(process.listenerCount("SIGTERM"), signalListeners.SIGTERM);
   } finally {
@@ -2062,25 +2098,29 @@ process.stdout.write(retained.codexHome + "\\n");
 process.stdin.resume();
 `,
   );
-  const child = spawn(process.execPath, [fixture], {
-    stdio: ["pipe", "pipe", "pipe"],
-  });
-  let stdout = "";
-  const temporaryHome = await new Promise((resolve, reject) => {
-    child.once("error", reject);
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString("utf8");
-      const line = stdout.match(/^(.+)\r?\n/u)?.[1];
-      if (line) resolve(line);
+  const interruptionSignals =
+    process.platform === "win32" ? ["SIGTERM"] : ["SIGTERM", "SIGHUP"];
+  for (const requestedSignal of interruptionSignals) {
+    const child = spawn(process.execPath, [fixture], {
+      stdio: ["pipe", "pipe", "pipe"],
     });
-  });
-  assert.equal(existsSync(temporaryHome), true);
-  const exit = once(child, "exit");
-  child.kill("SIGTERM");
-  const [code, signal] = await exit;
-  assert.equal(code, null);
-  assert.equal(signal, "SIGTERM");
-  assert.equal(existsSync(temporaryHome), false);
+    let stdout = "";
+    const temporaryHome = await new Promise((resolve, reject) => {
+      child.once("error", reject);
+      child.stdout.on("data", (chunk) => {
+        stdout += chunk.toString("utf8");
+        const line = stdout.match(/^(.+)\r?\n/u)?.[1];
+        if (line) resolve(line);
+      });
+    });
+    assert.equal(existsSync(temporaryHome), true);
+    const exit = once(child, "exit");
+    child.kill(requestedSignal);
+    const [code, signal] = await exit;
+    assert.equal(code, null);
+    assert.equal(signal, requestedSignal);
+    assert.equal(existsSync(temporaryHome), false);
+  }
 });
 
 test("doctor reports Codex availability from the target safety preflight", (t) => {
@@ -2398,6 +2438,22 @@ test("check-commit-message validates a proposed repair commit", (t) => {
   );
   assert.equal(result.status, 0, result.stderr);
 
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
+    "Preserve shell-prefixed product test names",
+    "--body",
+    narrativeCommitBody.replace(
+      "- npm test -- retry\n- npm run validate",
+      '- $ node --test --test-name-pattern="reject per reviewer feedback"',
+    ),
+    "--product-terms",
+    "The command verifies the repository's reviewer-product behavior",
+  );
+  assert.equal(result.status, 0, result.stderr);
+
   assert.equal(effectivePolicy.policy.mode, "override");
   assert.equal(effectivePolicy.policy.source, "CONTRIBUTING.md");
   assert.deepEqual(effectivePolicy.policy.overrides, ["subject"]);
@@ -2438,6 +2494,7 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "- $ echo Addressed Codex review feedback",
     '- `echo "Reviewed by Codex"`',
     "- `npm test`\n  --message=Reviewed by Codex",
+    "- npm test \\\n  --message=\"Reviewed by Codex\"",
   ]) {
     result = invoke(
       directory,

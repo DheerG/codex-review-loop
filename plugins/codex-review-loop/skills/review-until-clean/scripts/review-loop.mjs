@@ -70,6 +70,7 @@ const CODEX_REVIEW_RETAINED_FEATURES = new Set([
 ]);
 const GIT_REVISION_SUFFIX_SOURCE = String.raw`(?:\^\{(?:commit|tree|blob|tag|object)?\}|~\d*|\^\d*)`;
 const SKILL_SCRIPT = fileURLToPath(import.meta.url);
+const INTERNAL_BOUNDED_CODEX_RUN = "__bounded-codex-run";
 
 function codexFeatureRequiresIsolation(feature) {
   return !CODEX_REVIEW_RETAINED_FEATURES.has(feature);
@@ -84,17 +85,70 @@ class CliError extends Error {
   }
 }
 
-function run(command, args, options = {}) {
-  const result = spawnSync(command, args, {
-    cwd: options.cwd,
-    encoding: "utf8",
-    env: options.env ?? process.env,
-    input: options.input,
-    killSignal: options.timeoutMs ? "SIGKILL" : undefined,
-    maxBuffer: MAX_CAPTURE_BYTES,
-    timeout: options.timeoutMs,
-    stdio: ["pipe", "pipe", "pipe"],
+async function boundedCodexRun(args) {
+  const child = spawn("codex", args, {
+    detached: process.platform !== "win32",
+    stdio: ["inherit", "inherit", "inherit"],
+    windowsHide: true,
   });
+  let settled = false;
+  const handlers = new Map();
+  const removeHandlers = () => {
+    for (const [signal, handler] of handlers) {
+      process.removeListener(signal, handler);
+    }
+  };
+  const terminate = () => {
+    if (settled) return;
+    if (process.platform === "win32") {
+      spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
+        stdio: "ignore",
+        windowsHide: true,
+      });
+    } else {
+      try {
+        process.kill(-child.pid, "SIGKILL");
+      } catch (error) {
+        if (error?.code !== "ESRCH") throw error;
+      }
+    }
+    process.exit(124);
+  };
+  for (const signal of ["SIGHUP", "SIGINT", "SIGTERM"]) {
+    handlers.set(signal, terminate);
+    process.once(signal, terminate);
+  }
+  return new Promise((resolve) => {
+    child.once("error", (error) => {
+      settled = true;
+      removeHandlers();
+      process.stderr.write(`codex could not run: ${error.message}\n`);
+      resolve(127);
+    });
+    child.once("exit", (code, signal) => {
+      settled = true;
+      removeHandlers();
+      resolve(code ?? (signal ? 1 : 0));
+    });
+  });
+}
+
+function run(command, args, options = {}) {
+  const boundedCodex = command === "codex" && options.timeoutMs;
+  const result = spawnSync(
+    boundedCodex ? process.execPath : command,
+    boundedCodex ? [SKILL_SCRIPT, INTERNAL_BOUNDED_CODEX_RUN, ...args] : args,
+    {
+      cwd: options.cwd,
+      encoding: "utf8",
+      env: options.env ?? process.env,
+      input: options.input,
+      killSignal: options.timeoutMs ? "SIGTERM" : undefined,
+      maxBuffer: MAX_CAPTURE_BYTES,
+      timeout: options.timeoutMs,
+      stdio: ["pipe", "pipe", "pipe"],
+    },
+  );
   if (result.error) {
     throw new CliError(`${command} could not run: ${result.error.message}`, 2);
   }
@@ -1357,36 +1411,42 @@ function codexReviewPreferencesFromRecords(records, source, options = {}) {
   ) {
     const dependencies = [];
     const effectiveModelProvider = modelProvider ?? "openai";
-    if (configuredModelProviders.get(effectiveModelProvider) === false) {
+    const isolatedDifferences = new Set(
+      options.isolatedTransportDependencies ?? [],
+    );
+    const retainedEquivalent = (dependency) =>
+      options.isolatedTransportCompared === true &&
+      !isolatedDifferences.has(dependency);
+    if (
+      configuredModelProviders.get(effectiveModelProvider) === false &&
+      !retainedEquivalent(`model_providers.${effectiveModelProvider}`)
+    ) {
       dependencies.push(`model_providers.${effectiveModelProvider}`);
     } else if (
       modelProvider &&
       modelProvider !== "openai" &&
-      modelProviderRecord?.retainedForReview !== true
+      modelProviderRecord?.retainedForReview !== true &&
+      !retainedEquivalent("model_provider")
     ) {
       dependencies.push(`model_provider=${JSON.stringify(modelProvider)}`);
     }
     if (
       (preferences.model || preferences.review_model) &&
       modelCatalogRecord &&
-      modelCatalogRecord.retainedForReview !== true
+      modelCatalogRecord.retainedForReview !== true &&
+      !retainedEquivalent("model_catalog_json")
     ) {
       dependencies.push("model_catalog_json");
     }
     if (
       openAiBaseUrlRecord &&
       effectiveModelProvider === "openai" &&
-      openAiBaseUrlRecord.retainedForReview !== true
+      openAiBaseUrlRecord.retainedForReview !== true &&
+      !retainedEquivalent("openai_base_url")
     ) {
       dependencies.push("openai_base_url");
     }
-    for (const dependency of options.isolatedTransportDependencies ?? []) {
-      if (
-        modelProvider === "openai" &&
-        dependency.startsWith("model_provider=")
-      ) {
-        continue;
-      }
+    for (const dependency of isolatedDifferences) {
       dependencies.push(`isolated profile ${dependency}`);
     }
     if (dependencies.length > 0) {
@@ -1422,11 +1482,13 @@ export function codexReviewPreferencesFromConfigs(
 ) {
   const records = effectiveCodexRecordsFromConfigs(configs, options);
   let isolatedTransportDependencies = [];
+  let isolatedTransportCompared = false;
   if (
     options.legacyProfiles &&
     Object.hasOwn(options, "retainedLegacyProfile") &&
     options.selectedLegacyProfile !== options.retainedLegacyProfile
   ) {
+    isolatedTransportCompared = true;
     const retainedConfigs = configs.filter(
       (config) => config.retainedForReview === true,
     );
@@ -1447,7 +1509,7 @@ export function codexReviewPreferencesFromConfigs(
   return codexReviewPreferencesFromRecords(
     records,
     source,
-    { isolatedTransportDependencies },
+    { isolatedTransportCompared, isolatedTransportDependencies },
   );
 }
 
@@ -2340,7 +2402,7 @@ function retainedCodexHomeCleanup(temporaryHome) {
     rmSync(temporaryHome, { recursive: true, force: true });
     cleaned = true;
   };
-  for (const signal of ["SIGINT", "SIGTERM"]) {
+  for (const signal of ["SIGHUP", "SIGINT", "SIGTERM"]) {
     const handler = () => {
       try {
         cleanup();
@@ -3678,10 +3740,13 @@ function commitSection(body, name) {
     .trim();
 }
 
-function isVerbatimVerificationCommand(line) {
+function isVerbatimVerificationCommand(line, allowProductTerms = false) {
   const trimmed = line.trim();
   const bullet = trimmed.match(/^[-*]\s+(.+)/u);
-  return isCommandShapedVerification(bullet?.[1] ?? trimmed);
+  return isCommandShapedVerification(
+    bullet?.[1] ?? trimmed,
+    allowProductTerms,
+  );
 }
 
 function hasWorkflowAttribution(text) {
@@ -3770,14 +3835,16 @@ function hasAttributedShellComment(text) {
   );
 }
 
-function isCommandShapedVerification(text) {
+function isCommandShapedVerification(text, allowProductTerms = false) {
   const shellPrompt = text.match(/^\$\s+(.+)/u);
   if (shellPrompt) {
     const command = withoutLeadingEnvironmentAssignments(shellPrompt[1]);
+    const attributionLike = hasWorkflowAttribution(command);
     return (
-      !hasWorkflowAttribution(command) &&
       !hasExplicitAiAuthorship(command) &&
-      !hasAttributedShellComment(command)
+      !hasAttributedShellComment(command) &&
+      (!attributionLike ||
+        (allowProductTerms && hasUnambiguousShellSyntax(command)))
     );
   }
   const markdownCommand = text.match(/^`([^`]+)`$/u);
@@ -3785,10 +3852,12 @@ function isCommandShapedVerification(text) {
     const command = withoutLeadingEnvironmentAssignments(
       markdownCommand[1].trim(),
     );
+    const attributionLike = hasWorkflowAttribution(command);
     return (
-      !hasWorkflowAttribution(command) &&
       !hasExplicitAiAuthorship(command) &&
-      !hasAttributedShellComment(command)
+      !hasAttributedShellComment(command) &&
+      (!attributionLike ||
+        (allowProductTerms && hasUnambiguousShellSyntax(command)))
     );
   }
   if (isEnvironmentOnlyCommandContinuation(text)) return true;
@@ -3822,7 +3891,10 @@ function isCommandShapedVerification(text) {
     return false;
   }
   const attributionLike = hasWorkflowAttribution(text);
-  return !hasAttributedShellComment(text) && (!attributionLike || explicitSyntax);
+  return (
+    !hasAttributedShellComment(text) &&
+    (!attributionLike || (allowProductTerms && explicitSyntax))
+  );
 }
 
 function hasUnambiguousShellSyntax(text) {
@@ -3875,7 +3947,10 @@ function verificationEvidenceLines(
       continue;
     }
     const acceptsEvidence = anySection || section === "Verification";
-    if (acceptsEvidence && isVerbatimVerificationCommand(line)) {
+    if (
+      acceptsEvidence &&
+      isVerbatimVerificationCommand(line, allowProductTerms)
+    ) {
       evidence.add(index);
       commandContinues = hasShellContinuationMarker(line);
     } else if (isCommitSectionBoundary(line)) {
@@ -3923,10 +3998,15 @@ function hasShellContinuationMarker(line) {
 function isVerbatimVerificationContinuation(line, allowProductTerms = false) {
   const trimmed = line.trim();
   const option = /^--?[A-Za-z0-9][A-Za-z0-9_-]*(?:=|\s|$)/u.test(trimmed);
+  const productTestOption = /^--?[A-Za-z0-9_-]*(?:test|pattern|grep|filter|match|name)[A-Za-z0-9_-]*(?:=|\s|$)/iu.test(
+    trimmed,
+  );
   return (
-    (!hasWorkflowAttribution(trimmed) || (allowProductTerms && option)) &&
+    !hasExplicitAiAuthorship(trimmed) &&
+    (!hasWorkflowAttribution(trimmed) ||
+      (allowProductTerms && productTestOption)) &&
     (
-      isCommandShapedVerification(trimmed) ||
+      isCommandShapedVerification(trimmed, allowProductTerms) ||
       /^[A-Za-z][A-Za-z0-9]*-[A-Za-z][A-Za-z0-9]*(?:\s|$)/u.test(trimmed) ||
       option ||
       /^(?:\.{0,2}[\\/])?[A-Za-z0-9_@+.-]+(?:[\\/][A-Za-z0-9_@+.-]+)+(?:\s|$)/u.test(trimmed) ||
@@ -4401,5 +4481,8 @@ export async function main(argv, runtime = {}) {
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(SKILL_SCRIPT)) {
-  process.exitCode = await main(process.argv.slice(2));
+  process.exitCode =
+    process.argv[2] === INTERNAL_BOUNDED_CODEX_RUN
+      ? await boundedCodexRun(process.argv.slice(3))
+      : await main(process.argv.slice(2));
 }
