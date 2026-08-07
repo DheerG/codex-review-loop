@@ -671,14 +671,14 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
       [
         {
           contents:
-            'approval_policy = "on-request"\nprofile = "safe"\n[profiles.safe]\napproval_policy = "never"',
+            'profile = "danger"\n[profiles.danger]\ndeveloper_instructions = "unsafe"\n[profiles.danger.mcp_servers.writer]\ncommand = "writer"\n[profiles.safe.mcp_servers.reader]\ncommand = "reader"',
           file: "system config",
         },
       ],
       [],
       true,
     ),
-    [],
+    ["writer"],
   );
   assert.deepEqual(
     codexManagedHazardsFromToml(
@@ -1635,6 +1635,71 @@ obsolete_external_tool             removed            true
     { model: "gpt-profile" },
   );
 
+  const nativePreferencePrecedence = codexFeaturesForReview(
+    {
+      root: "/tmp/repository",
+      isolateCodexConfig: false,
+      codexLegacyProfiles: false,
+    },
+    {},
+    undefined,
+    (_root, _env, requested = []) =>
+      new Map([
+        ["hooks", !requested.includes("hooks")],
+        ["shell_tool", true],
+      ]),
+    () => ({
+      managedConfigs: [
+        {
+          contents: 'review_model = "cloud-review"',
+          file: "cloud-managed Codex config",
+        },
+      ],
+      requirementsConfigs: [],
+    }),
+    {
+      localConfigInventory: {
+        ordinaryConfigs: [
+          {
+            contents: 'review_model = "system-review"',
+            file: "system config",
+          },
+        ],
+        managedConfigs: [
+          {
+            contents: 'review_model = "managed-review"',
+            file: "legacy-managed config",
+          },
+        ],
+        requirementsConfigs: [],
+      },
+      mcpServers: [],
+      preferenceContext: {
+        userConfig: {
+          contents: 'review_model = "user-review"',
+          file: "user config",
+        },
+      },
+    },
+  );
+  assert.deepEqual(
+    nativePreferencePrecedence.preferenceConfigs.map((config) => config.file),
+    [
+      "system config",
+      "cloud-managed Codex config",
+      "user config",
+      "legacy-managed config",
+    ],
+  );
+  assert.deepEqual(
+    codexReviewPreferencesFromConfigs(
+      nativePreferencePrecedence.preferenceConfigs,
+      "native Codex preference precedence",
+      { legacyProfiles: false },
+    ),
+    { review_model: "managed-review" },
+  );
+
   const cloudSelectedSafeProfileMcpServers = ["writer"];
   const cloudSelectedSafeProfileFeatures = codexFeaturesForReview(
     {
@@ -2463,6 +2528,24 @@ test("check-commit-message validates a proposed repair commit", (t) => {
   );
   assert.equal(result.status, 0, result.stderr);
 
+  for (const productSelector of [
+    '- jest -t "reject per reviewer feedback"',
+    '- go test -run "reject per reviewer feedback"',
+  ]) {
+    result = invoke(
+      directory,
+      env,
+      "check-commit-message",
+      "--subject",
+      "Preserve native product test aliases",
+      "--body",
+      narrativeCommitBody.replace("- npm test -- retry", productSelector),
+      "--product-terms",
+      "The command verifies the repository's reviewer-product behavior",
+    );
+    assert.equal(result.status, 0, `${productSelector}\n${result.stderr}`);
+  }
+
   result = invoke(
     directory,
     env,
@@ -2593,6 +2676,9 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     '- `MESSAGE="Reviewed by Codex" npm test`',
     '- MESSAGE="Reviewed by Codex" npm test',
     "- Used Codex to implement this patch.",
+    '- echo --filter "Reviewed by Codex"',
+    "- Changes requested by Codex",
+    "- Implementation recommended by Codex",
   ]) {
     result = invoke(
       directory,
@@ -2606,6 +2692,26 @@ test("check-commit-message validates a proposed repair commit", (t) => {
       "The repository implements reviewer-provider behavior",
     );
     assert.equal(result.status, 2, `${attributionBullet}\n${result.stdout}`);
+    assert.match(result.stdout, /AI-workflow attribution/u);
+  }
+
+  for (const passiveAttribution of [
+    "- Changes requested by Codex",
+    "- Implementation recommended by Codex",
+  ]) {
+    result = invoke(
+      directory,
+      env,
+      "check-commit-message",
+      "--subject",
+      "Preserve terminal provider errors",
+      "--body",
+      narrativeCommitBody.replace(
+        "- npm test -- retry",
+        passiveAttribution,
+      ),
+    );
+    assert.equal(result.status, 2);
     assert.match(result.stdout, /AI-workflow attribution/u);
   }
 

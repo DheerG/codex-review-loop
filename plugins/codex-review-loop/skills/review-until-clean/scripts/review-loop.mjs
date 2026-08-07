@@ -2195,28 +2195,6 @@ export function codexMcpInventoryFromConfigs(
   const options = { legacyProfiles, selectedLegacyProfile };
   const names = new Set();
   for (const config of ordinaryConfigs) {
-    const promptHazards = codexPromptHazardsFromToml(
-      config.contents,
-      config.file,
-      options,
-    );
-    if (promptHazards.length > 0) {
-      throw new CliError(
-        `Cannot safely isolate prompt-affecting Codex settings from ${config.file}: ${promptHazards.join(", ")}.`,
-        3,
-      );
-    }
-    const approvalHazards = codexApprovalHazardsFromToml(
-      config.contents,
-      config.file,
-      options,
-    );
-    if (approvalHazards.length > 0) {
-      throw new CliError(
-        `Cannot safely isolate Codex approval settings from ${config.file}: ${approvalHazards.join(", ")}.`,
-        3,
-      );
-    }
     for (const name of codexMcpNamesFromToml(
       config.contents,
       config.file,
@@ -2224,14 +2202,6 @@ export function codexMcpInventoryFromConfigs(
     )) {
       names.add(name);
     }
-  }
-  for (const config of managedConfigs) {
-    assertManagedCodexConfigSafe(
-      config.contents,
-      config.file,
-      legacyProfiles,
-      selectedLegacyProfile,
-    );
   }
   return [...names].sort();
 }
@@ -2741,11 +2711,15 @@ function assertCloudCodexConfigurationSafe(
   const cloudConfigsByPrecedence = [...cloudConfigs].reverse();
   const mergedConfigs = [
     ...ordinaryConfigs,
-    ...managedConfigs,
     ...cloudConfigsByPrecedence,
+    ...managedConfigs,
   ];
   const preferenceConfigs = [
     ...ordinaryConfigs.map((config) => ({
+      ...config,
+      retainedForReview: true,
+    })),
+    ...cloudConfigsByPrecedence.map((config) => ({
       ...config,
       retainedForReview: true,
     })),
@@ -2753,10 +2727,6 @@ function assertCloudCodexConfigurationSafe(
       ? [{ ...userPreferenceConfig, retainedForReview: false }]
       : []),
     ...managedConfigs.map((config) => ({
-      ...config,
-      retainedForReview: true,
-    })),
-    ...cloudConfigsByPrecedence.map((config) => ({
       ...config,
       retainedForReview: true,
     })),
@@ -3797,6 +3767,10 @@ const WORKFLOW_ATTRIBUTION_PATTERNS = [
     String.raw`\b${AI_ATTRIBUTION_IDENTITY_SOURCE}\s+(?:found|identified|reported|flagged|raised|caught|suggested|requested|required|recommended|instructed)\s+(?:(?:this|the|these|those|an?)\s+)?(?:changes?|patch|implementation|code|fix|bug|issue|work)\b`,
     "iu",
   ),
+  new RegExp(
+    String.raw`\b(?:changes?|code|implementation|commits?|patch|work|fix(?:es)?)\b.{0,30}\b(?:requested|required|recommended|suggested)\s+by\s+(?:(?:an?|the)\s+)?${AI_ATTRIBUTION_IDENTITY_SOURCE}\b`,
+    "iu",
+  ),
   /\b(?:reviewed|generated|suggested|assisted|authored|co[ -]?authored|written|created|made|produced)\s+(?:by|with)\s+(?:(?:an?|the)\s+)?(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode|ai|llm|reviewer)\b/iu,
   /\b(?:(?:an?|the)\s+)?(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode|ai|llm|reviewer)[\s-]+(?:reviewed|generated|suggested|assisted|authored|co[ -]?authored|written|created|made|produced)\b/iu,
   /\b(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance)\s+(?:from|by)\s+(?:(?:an?|the)\s+)?(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode|ai|llm|reviewer)\b/iu,
@@ -3998,15 +3972,110 @@ function hasAttributedShellComment(text) {
   );
 }
 
-const PRODUCT_TEST_SELECTOR_OPTION = /(?<prefix>(?:^|\s)--?(?:test[-_]?name[-_]?pattern|testnamepattern|grep|filter|match|pattern|[km])(?:=|\s+))(?<value>"(?:\\.|[^"])*"|'[^']*'|\S+)/giu;
+function shellWordAndRest(text) {
+  const match = text.match(
+    /^(?:"(?<double>(?:\\.|[^"])*)"|'(?<single>[^']*)'|(?<bare>\S+))(?:\s+|$)(?<rest>[\s\S]*)/u,
+  );
+  if (!match) return null;
+  return {
+    word: match.groups.double ?? match.groups.single ?? match.groups.bare,
+    rest: match.groups.rest,
+  };
+}
+
+function shellExecutableName(word) {
+  return word
+    .split(/[\\/]/u)
+    .at(-1)
+    .replace(/\.(?:cmd|exe)$/iu, "")
+    .toLowerCase();
+}
+
+function testSelectorOptions(command) {
+  let invocation = shellWordAndRest(command.trimStart());
+  if (!invocation) return [];
+  let executable = shellExecutableName(invocation.word);
+  let args = invocation.rest;
+  if (["bunx", "npx"].includes(executable)) {
+    invocation = shellWordAndRest(args.trimStart());
+    if (!invocation) return [];
+    executable = shellExecutableName(invocation.word);
+    args = invocation.rest;
+  } else if (
+    ["pnpm", "yarn"].includes(executable) &&
+    /^(?:dlx|exec)\s+/u.test(args)
+  ) {
+    invocation = shellWordAndRest(args.replace(/^(?:dlx|exec)\s+/u, ""));
+    if (!invocation) return [];
+    executable = shellExecutableName(invocation.word);
+    args = invocation.rest;
+  }
+  switch (executable) {
+    case "node":
+      return /(?:^|\s)--test(?:\s|$)/u.test(args)
+        ? ["--test-name-pattern"]
+        : [];
+    case "jest":
+    case "vitest":
+      return ["-t", "--testNamePattern", "--test-name-pattern"];
+    case "mocha":
+    case "playwright":
+      return ["-g", "--grep"];
+    case "pytest":
+      return ["-k", "-m"];
+    case "go":
+      return /^test(?:\s|$)/u.test(args) ? ["-run"] : [];
+    case "deno":
+      return /^test(?:\s|$)/u.test(args) ? ["--filter"] : [];
+    case "bun":
+      return /^test(?:\s|$)/u.test(args)
+        ? ["-t", "--test-name-pattern"]
+        : [];
+    case "dotnet":
+      return /^test(?:\s|$)/u.test(args) ? ["--filter"] : [];
+    case "gradle":
+    case "gradlew":
+      return /(?:^|\s)test(?:\s|$)/u.test(args) ? ["--tests"] : [];
+    case "rspec":
+      return ["-e", "--example"];
+    case "swift":
+      return /^test(?:\s|$)/u.test(args) ? ["--filter"] : [];
+    default:
+      return [];
+  }
+}
+
+function shellCommandWithPrefix(text) {
+  const leadingLength = text.length - text.trimStart().length;
+  const trimmed = text.slice(leadingLength);
+  const command = withoutLeadingEnvironmentAssignments(trimmed);
+  return {
+    prefix: text.slice(0, leadingLength + trimmed.length - command.length),
+    command,
+  };
+}
+
+function escapeRegularExpression(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+}
 
 function commandAttributionProse(text, allowProductTerms) {
   if (!allowProductTerms) return text;
-  const withoutSelectors = text.replace(
-    PRODUCT_TEST_SELECTOR_OPTION,
-    (...args) => `${args.at(-1).prefix}"product test selector"`,
-  );
-  return attributionProse(withoutSelectors, true);
+  const { prefix, command } = shellCommandWithPrefix(text);
+  const options = testSelectorOptions(command);
+  let withoutSelectors = command;
+  if (options.length > 0) {
+    const optionSource = options.map(escapeRegularExpression).join("|");
+    const selector = new RegExp(
+      String.raw`(?<prefix>(?:^|\s)(?:${optionSource})(?:=|\s+))(?<value>"(?:\\.|[^"])*"|'[^']*'|\S+)`,
+      "giu",
+    );
+    withoutSelectors = command.replace(
+      selector,
+      (...args) => `${args.at(-1).prefix}"product test selector"`,
+    );
+  }
+  return attributionProse(`${prefix}${withoutSelectors}`, true);
 }
 
 function hasNonWaivableCommandAttribution(text, allowProductTerms) {
@@ -4124,6 +4193,7 @@ function verificationEvidenceLines(
   const evidence = new Set();
   let section = null;
   let commandContinues = false;
+  let continuedCommand = "";
   const lines = body.split(/\r?\n/u);
   for (const [index, line] of lines.entries()) {
     const heading = line.trim().match(
@@ -4132,6 +4202,7 @@ function verificationEvidenceLines(
     if (heading) {
       section = heading[1];
       commandContinues = false;
+      continuedCommand = "";
       continue;
     }
     const acceptsEvidence = anySection || section === "Verification";
@@ -4141,24 +4212,45 @@ function verificationEvidenceLines(
     ) {
       evidence.add(index);
       commandContinues = hasShellContinuationMarker(line);
+      continuedCommand = commandContinues
+        ? verbatimVerificationCommandText(line)
+        : "";
     } else if (isCommitSectionBoundary(line)) {
       section = null;
       commandContinues = false;
+      continuedCommand = "";
       continue;
     } else if (!acceptsEvidence) {
       continue;
     } else if (
       commandContinues &&
       /^\s+\S/u.test(line) &&
-      isVerbatimVerificationContinuation(line, allowProductTerms)
+      isVerbatimVerificationContinuation(
+        line,
+        allowProductTerms,
+        continuedCommand,
+      )
     ) {
       evidence.add(index);
       commandContinues = hasShellContinuationMarker(line);
+      continuedCommand = commandContinues
+        ? `${continuedCommand}\n${line.trim()}`
+        : "";
     } else {
       commandContinues = false;
+      continuedCommand = "";
     }
   }
   return evidence;
+}
+
+function verbatimVerificationCommandText(line) {
+  let command = line.trim();
+  const bullet = command.match(/^[-*]\s+(.+)/u);
+  if (bullet) command = bullet[1].trim();
+  const markdown = command.match(/^`([^`]+)`$/u);
+  if (markdown) command = markdown[1].trim();
+  return command.replace(/^\$\s+/u, "");
 }
 
 function hasShellContinuationMarker(line) {
@@ -4183,11 +4275,18 @@ function hasShellContinuationMarker(line) {
   );
 }
 
-function isVerbatimVerificationContinuation(line, allowProductTerms = false) {
+function isVerbatimVerificationContinuation(
+  line,
+  allowProductTerms = false,
+  commandContext = "",
+) {
   const trimmed = line.trim();
   const option = /^--?[A-Za-z0-9][A-Za-z0-9_-]*(?:=|\s|$)/u.test(trimmed);
+  const attributionText = commandContext
+    ? `${commandContext}\n${trimmed}`
+    : trimmed;
   return (
-    !hasNonWaivableCommandAttribution(trimmed, allowProductTerms) &&
+    !hasNonWaivableCommandAttribution(attributionText, allowProductTerms) &&
     (
       isCommandShapedVerification(trimmed, allowProductTerms) ||
       /^[A-Za-z][A-Za-z0-9]*-[A-Za-z][A-Za-z0-9]*(?:\s|$)/u.test(trimmed) ||
