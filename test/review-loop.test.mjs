@@ -544,6 +544,16 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
     ["model_catalog_json"],
   );
   assert.deepEqual(
+    codexPromptHazardsFromToml(
+      'project_doc_max_bytes = 0\nproject_doc_fallback_filenames = ["REVIEW.md"]\nproject_root_markers = [".hg"]',
+    ),
+    [
+      "project_doc_fallback_filenames",
+      "project_doc_max_bytes",
+      "project_root_markers",
+    ],
+  );
+  assert.deepEqual(
     codexRequirementsHazardsFromToml(`
 allowed_approval_policies = ["on-request", "never"]
 allowed_approvals_reviewers = ["user"]
@@ -702,30 +712,25 @@ multi_agent                        stable             true
   );
 });
 
-test("Codex feature probing keeps temporary config below Git state", () => {
-  const storage = mkdtempSync(path.join(os.tmpdir(), "review-loop-git-state-"));
-  let probeHome;
-  try {
-    const disabled = codexFeaturesForReview(
-      { root: "/tmp/repository", isolateCodexConfig: true },
-      { CODEX_HOME: "/unreadable/user/config" },
-      storage,
-      (_root, env, requested = []) => {
-        probeHome = env.CODEX_HOME;
-        assert.equal(probeHome.startsWith(storage), true);
-        assert.equal(existsSync(probeHome), true);
-        return new Map([
-          ["codex_hooks", !requested.includes("codex_hooks")],
-          ["apps", !requested.includes("apps")],
-          ["multi_agent", !requested.includes("multi_agent")],
-        ]);
-      },
-    );
-    assert.deepEqual(disabled, ["codex_hooks", "apps", "multi_agent"]);
-    assert.equal(existsSync(probeHome), false);
-  } finally {
-    rmSync(storage, { recursive: true, force: true });
-  }
+test("Codex feature probing preserves authenticated managed identity", () => {
+  const env = {
+    CODEX_HOME: "/authenticated/codex-home",
+    MANAGED_IDENTITY: "cloud-bundle",
+  };
+  const disabled = codexFeaturesForReview(
+    { root: "/tmp/repository", isolateCodexConfig: true },
+    env,
+    "/unused/git-state",
+    (_root, probeEnv, requested = []) => {
+      assert.equal(probeEnv, env);
+      return new Map([
+        ["codex_hooks", !requested.includes("codex_hooks")],
+        ["apps", !requested.includes("apps")],
+        ["multi_agent", !requested.includes("multi_agent")],
+      ]);
+    },
+  );
+  assert.deepEqual(disabled, ["codex_hooks", "apps", "multi_agent"]);
 });
 
 test("doctor reports Codex availability from the target safety preflight", (t) => {
@@ -1194,6 +1199,8 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "Co-authored-by: GPT-5",
     "Reviewed-by: reviewer",
     "  Co-authored-by: Codex",
+    "Co-authored-by: GitHub Copilot <copilot@github.com>",
+    "Generated-by: automated AI agent <automation@example.test>",
   ]) {
     result = invoke(
       directory,

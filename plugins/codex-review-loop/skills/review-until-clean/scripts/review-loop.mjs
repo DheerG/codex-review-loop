@@ -10,7 +10,6 @@ import {
   fstatSync,
   lstatSync,
   mkdirSync,
-  mkdtempSync,
   openSync,
   readFileSync,
   readSync,
@@ -1123,6 +1122,9 @@ export function codexPromptHazardsFromToml(
     "instructions",
     "model_catalog_json",
     "model_instructions_file",
+    "project_doc_fallback_filenames",
+    "project_doc_max_bytes",
+    "project_root_markers",
   ]);
   for (const record of effectiveCodexRecords(
     records,
@@ -1662,36 +1664,22 @@ function runCodexFeatureList(root, env, disabledFeatures = []) {
 export function codexFeaturesForReview(
   state,
   env,
-  storage,
+  _storage,
   inventory = runCodexFeatureList,
 ) {
-  let temporaryHome;
-  if (storage) {
-    mkdirSync(storage, { recursive: true });
-    temporaryHome = mkdtempSync(path.join(storage, "codex-config-probe-"));
-  } else {
-    temporaryHome = mkdtempSync(
-      path.join(os.tmpdir(), "codex-review-loop-config-probe-"),
+  const supported = inventory(state.root, env);
+  const disabled = CODEX_REVIEW_DISABLED_FEATURES.filter((feature) =>
+    supported.has(feature),
+  );
+  const effective = inventory(state.root, env, disabled);
+  const active = disabled.filter((feature) => effective.get(feature) !== false);
+  if (active.length > 0) {
+    throw new CliError(
+      `Cannot safely disable managed Codex features: ${active.join(", ")}.`,
+      3,
     );
   }
-  const probeEnv = { ...env, CODEX_HOME: temporaryHome };
-  try {
-    const supported = inventory(state.root, probeEnv);
-    const disabled = CODEX_REVIEW_DISABLED_FEATURES.filter((feature) =>
-      supported.has(feature),
-    );
-    const effective = inventory(state.root, probeEnv, disabled);
-    const active = disabled.filter((feature) => effective.get(feature) !== false);
-    if (active.length > 0) {
-      throw new CliError(
-        `Cannot safely disable managed Codex features: ${active.join(", ")}.`,
-        3,
-      );
-    }
-    return disabled;
-  } finally {
-    rmSync(temporaryHome, { recursive: true, force: true });
-  }
+  return disabled;
 }
 
 export function codexReviewArgs(
@@ -2448,6 +2436,18 @@ function longCommitProseLine(body) {
   );
 }
 
+const AI_ATTRIBUTION_IDENTITY =
+  /\b(?:ai|artificial intelligence|llm|language model|assistant|agent|bot|reviewer|codex|claude|gemini|chatgpt|gpt(?:-\d+(?:\.\d+)*)?|openai|anthropic|opencode|(?:github\s+)?copilot|cursor|windsurf|aider|devin|codeium|tabnine|qodo|amazon\s+q|sourcegraph\s+cody)\b/iu;
+
+function hasAiAttributionTrailer(message) {
+  const trailers = message.matchAll(
+    /^[\t ]*(?:[-*]\s+)?[A-Za-z0-9][A-Za-z0-9-]*-(?:by|with):(?<identity>.*)$/gimu,
+  );
+  return [...trailers].some((trailer) =>
+    AI_ATTRIBUTION_IDENTITY.test(trailer.groups.identity),
+  );
+}
+
 function inspectCommitMessageWithPolicy(subject, body, options) {
   const issues = [];
   const proseBody = commitProseBody(body, !options.useDefaultBodyFormat);
@@ -2485,11 +2485,7 @@ function inspectCommitMessageWithPolicy(subject, body, options) {
       "message narrates or defends the review process instead of the product change",
     );
   }
-  if (
-    /^[\t ]*(?:[-*]\s+)?[A-Za-z0-9][A-Za-z0-9-]*-(?:by|with):.*\b(?:codex|claude|gemini|chatgpt|gpt(?:-\d+(?:\.\d+)*)?|openai|anthropic|opencode|ai|llm|reviewer)\b/imu.test(
-      `${subject}\n${body}`,
-    )
-  ) {
+  if (hasAiAttributionTrailer(`${subject}\n${body}`)) {
     issues.push("message contains an AI attribution trailer");
   }
   if (options.useDefaultSubjectFormat) {
