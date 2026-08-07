@@ -318,7 +318,7 @@ ${formattedVerdict}`,
       }),
       "codex",
     ).status,
-    "invalid",
+    "clean",
   );
   assert.equal(
     parseReview(
@@ -343,7 +343,7 @@ ${formattedVerdict}`,
       }),
       "codex",
     ).status,
-    "invalid",
+    "clean",
   );
   assert.equal(
     parseReview(
@@ -351,6 +351,19 @@ ${formattedVerdict}`,
         findings: [],
         overall_correctness: "patch is correct",
         overall_explanation: "No unresolved issues remain.",
+        overall_confidence_score: 0.99,
+      }),
+      "codex",
+    ).status,
+    "clean",
+  );
+  assert.equal(
+    parseReview(
+      JSON.stringify({
+        findings: [],
+        overall_correctness: "patch is correct",
+        overall_explanation:
+          "No in-scope functional findings were identified in the reviewed change.",
         overall_confidence_score: 0.99,
       }),
       "codex",
@@ -644,6 +657,12 @@ local = { command = "node", args = ["server.mjs", "--secret"] }
   assert.deepEqual(
     codexManagedHazardsFromToml('web_search = "live"'),
     ["web_search"],
+  );
+  assert.deepEqual(
+    codexManagedHazardsFromToml(
+      'sqlite_home = "/tmp/external-state"\nlog_dir = "/tmp/external-logs"',
+    ),
+    ["log_dir", "sqlite_home"],
   );
   assert.deepEqual(
     codexManagedHazardsFromToml(
@@ -1522,6 +1541,34 @@ obsolete_external_tool             removed            true
         }),
       ),
     /cloud-managed Codex config.*features\.hooks/u,
+  );
+
+  assert.throws(
+    () =>
+      codexFeaturesForReview(
+        {
+          root: "/tmp/repository",
+          isolateCodexConfig: true,
+          codexLegacyProfiles: false,
+        },
+        {},
+        undefined,
+        (_root, _env, requested = []) =>
+          new Map([
+            ["hooks", !requested.includes("hooks")],
+            ["shell_tool", true],
+          ]),
+        () => ({
+          managedConfigs: [
+            {
+              contents: 'log_dir = "/tmp/external-logs"',
+              file: "cloud-managed Codex config (runtime path)",
+            },
+          ],
+          requirementsConfigs: [],
+        }),
+      ),
+    /cloud-managed Codex config.*log_dir/u,
   );
 
   assert.throws(
@@ -2547,7 +2594,10 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     '- jest -t "reject per reviewer feedback"',
     '- go test -run "reject per reviewer feedback"',
     '- npm test -- --testNamePattern "reject per reviewer feedback"',
+    '- npm --silent test -- --testNamePattern "per reviewer feedback"',
+    '- npm run test:unit -- --grep "per reviewer feedback"',
     '- pnpm test -- --test-name-pattern "reject per reviewer feedback"',
+    '- pnpm --filter workspace test -- --grep "per reviewer feedback"',
     '- yarn test -- --grep "reject per reviewer feedback"',
   ]) {
     result = invoke(
@@ -2595,6 +2645,8 @@ test("check-commit-message validates a proposed repair commit", (t) => {
   for (const attributedSubject of [
     "Fixed by Codex",
     "AI fixed this bug",
+    "Codex supplied this patch",
+    "Claude contributed this implementation",
   ]) {
     result = invoke(
       directory,
@@ -2730,6 +2782,8 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     '- echo --filter "Reviewed by Codex"',
     "- Changes requested by Codex",
     "- Implementation recommended by Codex",
+    "- Reviewer feedback is why this implementation changed.",
+    "- The Codex review was the reason for these changes.",
   ]) {
     result = invoke(
       directory,
@@ -2749,6 +2803,7 @@ test("check-commit-message validates a proposed repair commit", (t) => {
   for (const passiveAttribution of [
     "- Changes requested by Codex",
     "- Implementation recommended by Codex",
+    "- Reviewer feedback is why this implementation changed.",
   ]) {
     result = invoke(
       directory,

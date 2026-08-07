@@ -1764,7 +1764,12 @@ export function codexManagedHazardsFromToml(
   }
   for (const record of effectiveRecords) {
     const { parts } = record;
-    if (parts.length === 1 && parts[0] === "notify") {
+    if (
+      parts.length === 1 &&
+      ["log_dir", "sqlite_home"].includes(parts[0])
+    ) {
+      hazards.add(parts[0]);
+    } else if (parts.length === 1 && parts[0] === "notify") {
       if (
         record.value === undefined ||
         record.value.replace(/\s/gu, "") !== "[]"
@@ -3318,15 +3323,13 @@ function parseCodexStructuredReview(text) {
   }
   if (
     findings.length === 0 &&
-    value.overall_correctness === "patch is correct" &&
-    codexExplicitClean(normalizeCodexCleanLine(value.overall_explanation))
+    value.overall_correctness === "patch is correct"
   ) {
     return { status: "clean", findings: [] };
   }
   if (
     findings.length > 0 &&
-    value.overall_correctness === "patch is incorrect" &&
-    !codexExplicitClean(normalizeCodexCleanLine(value.overall_explanation))
+    value.overall_correctness === "patch is incorrect"
   ) {
     return { status: "findings", findings };
   }
@@ -3764,6 +3767,10 @@ const PRODUCT_WORKFLOW_CAUSAL_PATTERNS = [
     String.raw`\b${PRODUCT_WORKFLOW_CHANGE}\b.{0,60}\b(?:was|were|is|are|has\s+been|have\s+been)?\s*${PRODUCT_WORKFLOW_CAUSAL_ACTION}\b.{0,40}\b(?:by|from|through)?\s*${PRODUCT_WORKFLOW_SOURCE}\b`,
     "iu",
   ),
+  new RegExp(
+    String.raw`\b${PRODUCT_WORKFLOW_SOURCE}\b.{0,40}\b(?:is|are|was|were)\s+(?:the\s+)?(?:reason(?:\s+for)?|why)\b.{0,40}\b${PRODUCT_WORKFLOW_CHANGE}\b`,
+    "iu",
+  ),
 ];
 const DIRECT_AI_FIX_ATTRIBUTION_PATTERNS = [
   new RegExp(
@@ -4022,6 +4029,65 @@ function shellExecutableName(word) {
     .toLowerCase();
 }
 
+function shellWords(text) {
+  const words = [];
+  let remaining = text.trim();
+  while (remaining) {
+    const parsed = shellWordAndRest(remaining);
+    if (!parsed) return null;
+    words.push(parsed.word);
+    remaining = parsed.rest.trimStart();
+  }
+  return words;
+}
+
+const PACKAGE_OPTIONS_WITH_VALUES = new Set([
+  "--cache",
+  "--cwd",
+  "--filter",
+  "--global-folder",
+  "--loglevel",
+  "--mutex",
+  "--prefix",
+  "--registry",
+  "--scope",
+  "--userconfig",
+  "--workspace",
+  "-C",
+  "-w",
+]);
+
+function packageManagerRunsTest(executable, commandPrefix) {
+  const words = shellWords(commandPrefix);
+  if (!words) return false;
+  let index = 0;
+  while (words[index]?.startsWith("-")) {
+    const option = words[index];
+    index += 1;
+    if (
+      !option.includes("=") &&
+      PACKAGE_OPTIONS_WITH_VALUES.has(option) &&
+      words[index] !== undefined
+    ) {
+      index += 1;
+    }
+  }
+  const command = words[index];
+  if (command === "test" && index === words.length - 1) return true;
+  if (
+    command === "run" &&
+    /^test(?::[A-Za-z0-9_.-]+)?$/u.test(words[index + 1] ?? "") &&
+    index + 2 === words.length
+  ) {
+    return true;
+  }
+  return (
+    ["pnpm", "yarn"].includes(executable) &&
+    /^test:[A-Za-z0-9_.-]+$/u.test(command ?? "") &&
+    index === words.length - 1
+  );
+}
+
 function testSelectorContext(command) {
   let invocation = shellWordAndRest(command.trimStart());
   if (!invocation) return null;
@@ -4083,9 +4149,16 @@ function testSelectorContext(command) {
     case "npm":
     case "pnpm":
     case "yarn": { // Product selectors begin only after script forwarding.
-      if (!/^(?:test|run\s+test)(?:\s|$)/u.test(args)) return null;
-      const forwarding = command.match(/\s--\s/u);
-      if (!forwarding) return null;
+      const forwarding = args.match(/\s--\s/u);
+      if (
+        !forwarding ||
+        !packageManagerRunsTest(
+          executable,
+          args.slice(0, forwarding.index),
+        )
+      ) {
+        return null;
+      }
       return context(
         [
           "-t",
@@ -4098,7 +4171,7 @@ function testSelectorContext(command) {
           "--testNamePattern",
           "--test-name-pattern",
         ],
-        forwarding.index + forwarding[0].length,
+        command.length - args.length + forwarding.index + forwarding[0].length,
       );
     }
     default:
@@ -4387,7 +4460,7 @@ function longCommitProseLine(body, allowProductTerms = false) {
   );
 }
 
-const AI_AUTHORSHIP_ACTION_SOURCE = String.raw`(?:reviewed|generated|suggested|assisted|authored|co[ -]?authored|written|wrote|created|made|produced|fix(?:es|ed|ing)?|build(?:s|ing)?|built|implement(?:s|ed|ing)?|develop(?:s|ed|ing)?|programmed|pair[ -]?programmed|help(?:ed|s|ing)?(?:\s+(?:to\s+)?author)?)`;
+const AI_AUTHORSHIP_ACTION_SOURCE = String.raw`(?:reviewed|generated|suggested|assisted|authored|co[ -]?authored|written|wrote|created|made|produced|suppl(?:y|ies|ied|ying)|contribut(?:e|es|ed|ing)|fix(?:es|ed|ing)?|build(?:s|ing)?|built|implement(?:s|ed|ing)?|develop(?:s|ed|ing)?|programmed|pair[ -]?programmed|help(?:ed|s|ing)?(?:\s+(?:to\s+)?author)?)`;
 const DIRECT_AI_USE_AUTHORSHIP_SOURCE = String.raw`\b(?:use|uses|used|using)\s+(?:(?:an?|the)\s+)?${AI_ATTRIBUTION_IDENTITY_SOURCE}\b.{0,40}\b(?:to\s+)?${AI_AUTHORSHIP_ACTION_SOURCE}\b`;
 const AI_ATTRIBUTION_IDENTITY = new RegExp(
   String.raw`\b${AI_ATTRIBUTION_IDENTITY_SOURCE}\b`,
