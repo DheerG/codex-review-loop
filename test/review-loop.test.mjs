@@ -260,6 +260,53 @@ ${formattedVerdict}`,
   assert.equal(structuredFinding.status, "findings");
   assert.equal(structuredFinding.findings[0].priority, "P1");
   assert.equal(structuredFinding.findings[0].title, "Preserve retry errors");
+  for (const priority of [undefined, null]) {
+    const finding = {
+      title: "[P2] Preserve optional priorities",
+      body: "The finding remains actionable.",
+      confidence_score: 0.9,
+      code_location: {
+        absolute_file_path: "/tmp/retry.js",
+        line_range: { start: 6, end: 6 },
+      },
+    };
+    if (priority === null) finding.priority = null;
+    const parsed = parseReview(
+      JSON.stringify({
+        findings: [finding],
+        overall_correctness: "patch is incorrect",
+        overall_explanation: "An actionable defect remains.",
+        overall_confidence_score: 0.9,
+      }),
+      "codex",
+    );
+    assert.equal(parsed.status, "findings");
+    assert.equal(parsed.findings[0].priority, "P2");
+  }
+  assert.equal(
+    parseReview(
+      JSON.stringify({
+        findings: [],
+        overall_correctness: "patch is correct",
+        overall_explanation: "One defect remains in the retry path.",
+        overall_confidence_score: 0.99,
+      }),
+      "codex",
+    ).status,
+    "invalid",
+  );
+  assert.equal(
+    parseReview(
+      JSON.stringify({
+        findings: [],
+        overall_correctness: "patch is correct",
+        overall_explanation: "No defects remain in the retry path.",
+        overall_confidence_score: 0.99,
+      }),
+      "codex",
+    ).status,
+    "clean",
+  );
   assert.equal(
     parseReview(
       "Review comment:\n\n- [P2] Preserve retry errors — /tmp/retry.js:4-5\n  The error is discarded.",
@@ -1686,6 +1733,41 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     assert.equal(result.status, 2, `${attribution}\n${result.stdout}`);
     assert.match(result.stdout, /AI-workflow attribution/u);
   }
+
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
+    "Route retries through provider responses",
+    "--body",
+    "Created retry routing using OpenAI responses.",
+    "--policy",
+    "Repository-specific commit format",
+    "--policy-overrides",
+    "all",
+    "--product-terms",
+    "The repository implements an OpenAI response provider",
+  );
+  assert.equal(result.status, 0, result.stdout);
+
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
+    "Describe implementation provenance",
+    "--body",
+    "Changes created using OpenAI responses.",
+    "--policy",
+    "Repository-specific commit format",
+    "--policy-overrides",
+    "all",
+    "--product-terms",
+    "The repository implements an OpenAI response provider",
+  );
+  assert.equal(result.status, 2);
+  assert.match(result.stdout, /AI-workflow attribution/u);
 
   result = invoke(
     directory,

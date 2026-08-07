@@ -1640,6 +1640,7 @@ function codexUsesLegacyProfiles(state, env) {
     cwd: state.root,
     env,
     allowFailure: true,
+    timeoutMs: codexPreflightTimeout(env),
   });
   const versionMatch = version.stdout.match(/\b(\d+)\.(\d+)\.(\d+)\b/u);
   if (version.status !== 0 || !versionMatch) {
@@ -2587,6 +2588,12 @@ function parseCodexStructuredReview(text) {
     !value ||
     typeof value !== "object" ||
     !Array.isArray(value.findings) ||
+    typeof value.overall_explanation !== "string" ||
+    !value.overall_explanation.trim() ||
+    typeof value.overall_confidence_score !== "number" ||
+    !Number.isFinite(value.overall_confidence_score) ||
+    value.overall_confidence_score < 0 ||
+    value.overall_confidence_score > 1 ||
     !["patch is correct", "patch is incorrect"].includes(
       value.overall_correctness,
     )
@@ -2599,16 +2606,28 @@ function parseCodexStructuredReview(text) {
   }
   const findings = [];
   for (const finding of value.findings) {
-    const priority = finding?.priority;
+    const titlePriority = finding?.title?.match(/^\[P([0-3])\]\s*/u);
+    const declaredPriority = finding?.priority;
+    const priority =
+      declaredPriority === undefined || declaredPriority === null
+        ? titlePriority
+          ? Number(titlePriority[1])
+          : null
+        : declaredPriority;
     const location = finding?.code_location;
     const range = location?.line_range;
     if (
       !finding ||
       typeof finding.title !== "string" ||
       typeof finding.body !== "string" ||
+      typeof finding.confidence_score !== "number" ||
+      !Number.isFinite(finding.confidence_score) ||
+      finding.confidence_score < 0 ||
+      finding.confidence_score > 1 ||
       !Number.isInteger(priority) ||
       priority < 0 ||
       priority > 3 ||
+      (titlePriority && Number(titlePriority[1]) !== priority) ||
       typeof location?.absolute_file_path !== "string" ||
       !Number.isInteger(range?.start) ||
       !Number.isInteger(range?.end) ||
@@ -2633,13 +2652,15 @@ function parseCodexStructuredReview(text) {
   }
   if (
     findings.length === 0 &&
-    value.overall_correctness === "patch is correct"
+    value.overall_correctness === "patch is correct" &&
+    !codexExplanationClaimsFinding(value.overall_explanation)
   ) {
     return { status: "clean", findings: [] };
   }
   if (
     findings.length > 0 &&
-    value.overall_correctness === "patch is incorrect"
+    value.overall_correctness === "patch is incorrect" &&
+    !codexExplicitClean(normalizeCodexCleanLine(value.overall_explanation))
   ) {
     return { status: "findings", findings };
   }
@@ -2648,6 +2669,24 @@ function parseCodexStructuredReview(text) {
     findings,
     reason: "Codex structured findings contradict the overall correctness verdict.",
   };
+}
+
+function codexExplanationClaimsFinding(explanation) {
+  const prose = explanation
+    .replace(
+      /\b(?:no|without(?:\s+any)?|free\s+(?:of|from))\s+(?:(?:in-scope|actionable|material)\s+)?(?:findings?|defects?|issues?|bugs?|problems?|regressions?|vulnerabilities|errors?)\b/giu,
+      "",
+    )
+    .replace(
+      /\b(?:findings?|defects?|issues?|bugs?|problems?|regressions?|vulnerabilities|errors?)\s+(?:do|does|did)\s+not\s+(?:remain|exist|persist)\b/giu,
+      "",
+    );
+  return [
+    /\b(?:findings?|defects?|issues?|bugs?|problems?|regressions?|vulnerabilities|errors?)\s+(?:still\s+)?(?:remain|exist|persist|(?:was|were)\s+(?:found|identified)|(?:is|are)\s+present)\b/iu,
+    /\b(?:remaining|unresolved|actionable)\s+(?:finding|defect|issue|bug|problem|regression|vulnerability|error)s?\b/iu,
+    /\bthere\s+(?:is|are)\s+(?:(?:an?|one|two|three|\d+)\s+)?(?:(?:actionable|material)\s+)?(?:finding|defect|issue|bug|problem|regression|vulnerability|error)s?\b/iu,
+    /\b(?:patch|change|implementation|behavior|behaviour|path)\b.{0,40}\b(?:is|are|remains?|appears?|seems?)\s+(?:broken|incorrect|unsafe|faulty|defective)\b/iu,
+  ].some((pattern) => pattern.test(prose));
 }
 
 export function parseReview(output, provider = "custom") {
@@ -3078,7 +3117,7 @@ function hasAttribution(text, allowProductTerms) {
   }
   const prose = attributionProse(text, allowProductTerms);
   if (
-    hasExplicitAiAuthorship(prose) ||
+    hasExplicitAiAuthorship(prose, allowProductTerms) ||
     WORKFLOW_ATTRIBUTION_PATTERNS.some((pattern) => pattern.test(prose))
   ) {
     return true;
@@ -3264,9 +3303,27 @@ const EXPLICIT_AI_AUTHORSHIP_PATTERNS = [
     "iu",
   ),
 ];
+const CHANGE_AUTHORSHIP_OBJECT_SOURCE = String.raw`(?:changes?|code|implementation|commits?|patch|message|work)`;
+const PRODUCT_EXCEPTION_AI_AUTHORSHIP_PATTERNS = [
+  new RegExp(
+    String.raw`\b${CHANGE_AUTHORSHIP_OBJECT_SOURCE}\b.{0,50}\b${AI_AUTHORSHIP_ACTION_SOURCE}\b.{0,50}\b(?:by|with|using|via|from)\s+(?:(?:an?|the)\s+)?${AI_ATTRIBUTION_IDENTITY_SOURCE}\b`,
+    "iu",
+  ),
+  new RegExp(
+    String.raw`\b${AI_ATTRIBUTION_IDENTITY_SOURCE}\b.{0,50}\b${AI_AUTHORSHIP_ACTION_SOURCE}\b.{0,50}\b${CHANGE_AUTHORSHIP_OBJECT_SOURCE}\b`,
+    "iu",
+  ),
+  new RegExp(
+    String.raw`\b(?:pair[ -]?programmed|co[ -]?authored|authored|help(?:ed|s|ing)?\s+(?:to\s+)?author)\b.{0,50}\b(?:by|with|using|via|from)?\s*(?:(?:an?|the)\s+)?${AI_ATTRIBUTION_IDENTITY_SOURCE}\b`,
+    "iu",
+  ),
+];
 
-function hasExplicitAiAuthorship(text) {
-  return EXPLICIT_AI_AUTHORSHIP_PATTERNS.some((pattern) => pattern.test(text));
+function hasExplicitAiAuthorship(text, productException = false) {
+  const patterns = productException
+    ? PRODUCT_EXCEPTION_AI_AUTHORSHIP_PATTERNS
+    : EXPLICIT_AI_AUTHORSHIP_PATTERNS;
+  return patterns.some((pattern) => pattern.test(text));
 }
 
 function hasAiAttributionTrailer(message) {
