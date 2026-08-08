@@ -452,9 +452,10 @@ export function acquireReviewLock(repo) {
           .digest("hex")
           .slice(0, 16);
         const recoveryPrefix = `${path.basename(lockFile)}.recovery.${staleKey}.`;
+        const claimOrder = process.hrtime.bigint().toString().padStart(20, "0");
         const recoveryFile = path.join(
           repo.storage,
-          `${recoveryPrefix}${process.pid}.${token}`,
+          `${recoveryPrefix}${claimOrder}.${process.pid}.${token}`,
         );
         writeFileSync(recoveryFile, `${JSON.stringify(owner)}\n`, {
           encoding: "utf8",
@@ -462,12 +463,17 @@ export function acquireReviewLock(repo) {
           flag: "wx",
         });
         try {
+          const ownClaim = path.basename(recoveryFile);
+          const liveClaims = [{ entry: ownClaim, order: claimOrder }];
           for (const entry of readdirSync(repo.storage)) {
             if (!entry.startsWith(recoveryPrefix)) continue;
             const candidate = path.join(repo.storage, entry);
             if (candidate === recoveryFile) continue;
+            const suffix = entry.slice(recoveryPrefix.length);
+            const orderedOwner = suffix.match(/^(\d+)\.(\d+)\./u);
+            const legacyOwner = suffix.match(/^(\d+)\./u);
             const candidatePid = Number(
-              entry.slice(recoveryPrefix.length).match(/^(\d+)\./u)?.[1],
+              orderedOwner?.[2] ?? legacyOwner?.[1],
             );
             if (!Number.isSafeInteger(candidatePid) || candidatePid <= 0) {
               throw new CliError(
@@ -476,12 +482,23 @@ export function acquireReviewLock(repo) {
               );
             }
             if (codexProcessIsRunning(candidatePid)) {
-              throw new CliError(
-                "Another review command is already recovering the stale review lock.",
-                5,
-              );
+              liveClaims.push({
+                entry,
+                order: orderedOwner?.[1] ?? "",
+              });
+              continue;
             }
             rmSync(candidate, { force: true });
+          }
+          liveClaims.sort((left, right) =>
+            left.order.localeCompare(right.order) ||
+            left.entry.localeCompare(right.entry),
+          );
+          if (liveClaims[0].entry !== ownClaim) {
+            throw new CliError(
+              "Another review command is already recovering the stale review lock.",
+              5,
+            );
           }
           if (readFileSync(lockFile, "utf8") !== existingText) {
             throw new CliError(
@@ -4303,13 +4320,15 @@ function launcherCommandValue(command) {
   const invocation = shellWordAndRest(command.trimStart());
   if (!invocation) return null;
   const executable = shellExecutableName(invocation.word);
-  if (
-    executable !== "npx" &&
-    !(executable === "npm" && /^exec(?:\s|$)/u.test(invocation.rest))
-  ) {
+  let launcherArgs = invocation.rest;
+  if (executable === "npm") {
+    const subcommand = shellCommandAfterOptions(launcherArgs);
+    if (!subcommand || subcommand.word !== "exec") return null;
+    launcherArgs = subcommand.rest;
+  } else if (executable !== "npx") {
     return null;
   }
-  const match = invocation.rest.match(
+  const match = launcherArgs.match(
     /(?:^|\s)(?:-c|--call)(?:=|\s+)(?<value>"(?:\\.|[^"])*"|'[^']*')/u,
   );
   if (!match) return null;
@@ -4320,7 +4339,7 @@ function launcherCommandValue(command) {
       .replace(/\\\r?\n/gu, "")
       .replace(/\\(["\\$`])/gu, "$1")
     : parsed.word;
-  const argsOffset = command.length - invocation.rest.length;
+  const argsOffset = command.length - launcherArgs.length;
   const valueOffset = match[0].indexOf(match.groups.value);
   const start = argsOffset + match.index + valueOffset;
   return {
@@ -4384,6 +4403,9 @@ function testSelectorContext(command) {
   let executable = shellExecutableName(invocation.word);
   let args = invocation.rest;
   let selectorOffset = 0;
+  const npmSubcommand = executable === "npm"
+    ? shellCommandAfterOptions(args)
+    : null;
   if (["bunx", "npx"].includes(executable)) {
     invocation = shellCommandAfterOptions(args);
     if (!invocation) return null;
@@ -4391,8 +4413,8 @@ function testSelectorContext(command) {
     executable = shellExecutableName(invocation.word);
     args = invocation.rest;
     selectorOffset = command.length - args.length;
-  } else if (executable === "npm" && /^exec(?:\s|$)/u.test(args)) {
-    invocation = shellCommandAfterOptions(args.replace(/^exec\s+/u, ""));
+  } else if (npmSubcommand?.word === "exec") {
+    invocation = shellCommandAfterOptions(npmSubcommand.rest);
     if (!invocation) return null;
     resolvedWord = invocation.word;
     executable = shellExecutableName(invocation.word);
@@ -4591,7 +4613,15 @@ function hasNonWaivableCommandAttribution(text, allowProductTerms) {
   );
 }
 
+function isVerificationPlaceholder(text) {
+  let candidate = text.trim().replace(/^\$\s+/u, "");
+  const markdown = candidate.match(/^`([^`]+)`$/u);
+  if (markdown) candidate = markdown[1].trim();
+  return /^(?:TODO|Not run)[.!]?$/iu.test(candidate);
+}
+
 function isCommandShapedVerification(text, allowProductTerms = false) {
+  if (isVerificationPlaceholder(text)) return false;
   const shellPrompt = text.match(/^\$\s+(.+)/u);
   if (shellPrompt) {
     const originalCommand = shellPrompt[1];

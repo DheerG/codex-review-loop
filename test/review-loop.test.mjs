@@ -2641,8 +2641,18 @@ test("review locks use portable exclusive creates and recover dead owners", (t) 
     abandonedClaim,
     `${JSON.stringify({ pid: 1_000_000_000, token: "abandoned" })}\n`,
   );
+  const laterClaim = path.join(
+    storage,
+    `review.lock.recovery.${staleKey}.99999999999999999999.${process.pid}.later`,
+  );
+  writeFileSync(
+    laterClaim,
+    `${JSON.stringify({ pid: process.pid, token: "later" })}\n`,
+  );
   const releaseRecovered = acquireReviewLock(repo);
   assert.equal(existsSync(abandonedClaim), false);
+  assert.equal(existsSync(laterClaim), true);
+  rmSync(laterClaim);
   releaseRecovered();
   assert.equal(existsSync(path.join(storage, "review.lock")), false);
 });
@@ -2673,7 +2683,14 @@ test("commit-message rules reject workflow narration", () => {
     ).join("\n"),
     /missing the Failure: section/u,
   );
-  for (const placeholder of ["TODO", "Not run"]) {
+  for (const placeholder of [
+    "TODO",
+    "Not run",
+    "- $ TODO",
+    "- $ Not run",
+    "- `TODO`",
+    "- `Not run`",
+  ]) {
     assert.match(
       inspectCommitMessage(
         "Preserve errors across retry exhaustion",
@@ -2763,6 +2780,8 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     '- npm exec -- jest -t "reject per reviewer feedback"',
     '- npm exec -c \'jest -t "reject per reviewer feedback"\'',
     '- npm exec --workspace packages/reviewer -- jest -t "reject per reviewer feedback"',
+    '- npm --workspace packages/reviewer exec -- jest -t "reject per reviewer feedback"',
+    '- npm --workspace packages/reviewer exec -c \'jest -t "reject per reviewer feedback"\'',
     '- pnpm test -- --test-name-pattern "reject per reviewer feedback"',
     '- pnpm --filter workspace test -- --grep "per reviewer feedback"',
     '- yarn test -- --grep "reject per reviewer feedback"',
