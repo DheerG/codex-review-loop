@@ -393,9 +393,67 @@ function saveActive(repo, state) {
   writeJsonAtomic(repo.activeFile, state);
 }
 
+function recoveryClaimPid(entry, lockName) {
+  const prefix = `${lockName}.recovery.`;
+  if (!entry.startsWith(prefix) || entry.endsWith(".captured")) return null;
+  const parts = entry.slice(prefix.length).split(".");
+  if (/^[a-f0-9]{16}$/u.test(parts[0] ?? "")) {
+    if (/^\d{20,}$/u.test(parts[1] ?? "")) return Number(parts[2]);
+    return Number(parts[1]);
+  }
+  return Number(parts[0]);
+}
+
+function clearAbandonedReviewRecovery(repo, lockFile) {
+  const lockName = path.basename(lockFile);
+  const legacyRecovery = `${lockFile}.recovery`;
+  if (existsSync(legacyRecovery)) {
+    let owner;
+    try {
+      owner = JSON.parse(readFileSync(legacyRecovery, "utf8"));
+    } catch (error) {
+      throw new CliError(
+        `Cannot inspect the existing review-lock recovery claim: ${error.message}`,
+        5,
+      );
+    }
+    if (codexProcessIsRunning(owner.pid)) {
+      throw new CliError(
+        "Another review command is already recovering the stale review lock.",
+        5,
+      );
+    }
+    rmSync(legacyRecovery, { force: true });
+  }
+  for (const entry of readdirSync(repo.storage)) {
+    const ownerPid = recoveryClaimPid(entry, lockName);
+    if (ownerPid === null) continue;
+    if (!Number.isSafeInteger(ownerPid) || ownerPid <= 0) {
+      throw new CliError(
+        "Cannot inspect a review-lock recovery claim with an invalid owner.",
+        5,
+      );
+    }
+    const claim = path.join(repo.storage, entry);
+    if (codexProcessIsRunning(ownerPid)) {
+      throw new CliError(
+        "Another review command is already recovering the stale review lock.",
+        5,
+      );
+    }
+    const captured = `${claim}.captured`;
+    if (existsSync(captured)) {
+      if (existsSync(lockFile)) rmSync(captured, { force: true });
+      else renameSync(captured, lockFile);
+    }
+    rmSync(claim, { force: true });
+  }
+}
+
 export function acquireReviewLock(repo) {
   mkdirSync(repo.storage, { recursive: true });
   const lockFile = path.join(repo.storage, "review.lock");
+  clearAbandonedReviewRecovery(repo, lockFile);
   const token = randomUUID();
   const owner = {
     pid: process.pid,
@@ -428,91 +486,46 @@ export function acquireReviewLock(repo) {
         Number.isSafeInteger(existing.pid) &&
         !codexProcessIsRunning(existing.pid)
       ) {
-        const legacyRecoveryFile = `${lockFile}.recovery`;
-        if (existsSync(legacyRecoveryFile)) {
-          let legacyOwner;
-          try {
-            legacyOwner = JSON.parse(readFileSync(legacyRecoveryFile, "utf8"));
-          } catch (recoveryError) {
-            throw new CliError(
-              `Cannot inspect the existing review-lock recovery claim: ${recoveryError.message}`,
-              5,
-            );
-          }
-          if (codexProcessIsRunning(legacyOwner.pid)) {
-            throw new CliError(
-              "Another review command is already recovering the stale review lock.",
-              5,
-            );
-          }
-          rmSync(legacyRecoveryFile, { force: true });
-        }
-        const staleKey = createHash("sha256")
-          .update(existingText)
-          .digest("hex")
-          .slice(0, 16);
-        const recoveryPrefix = `${path.basename(lockFile)}.recovery.${staleKey}.`;
-        const claimOrder = process.hrtime.bigint().toString().padStart(20, "0");
-        const recoveryFile = path.join(
-          repo.storage,
-          `${recoveryPrefix}${claimOrder}.${process.pid}.${token}`,
-        );
+        const recoveryFile = `${lockFile}.recovery.${process.pid}.${token}`;
+        const capturedFile = `${recoveryFile}.captured`;
         writeFileSync(recoveryFile, `${JSON.stringify(owner)}\n`, {
           encoding: "utf8",
           mode: 0o600,
           flag: "wx",
         });
+        let captured = false;
         try {
-          const ownClaim = path.basename(recoveryFile);
-          const liveClaims = [{ entry: ownClaim, order: claimOrder }];
-          for (const entry of readdirSync(repo.storage)) {
-            if (!entry.startsWith(recoveryPrefix)) continue;
-            const candidate = path.join(repo.storage, entry);
-            if (candidate === recoveryFile) continue;
-            const suffix = entry.slice(recoveryPrefix.length);
-            const orderedOwner = suffix.match(/^(\d+)\.(\d+)\./u);
-            const legacyOwner = suffix.match(/^(\d+)\./u);
-            const candidatePid = Number(
-              orderedOwner?.[2] ?? legacyOwner?.[1],
-            );
-            if (!Number.isSafeInteger(candidatePid) || candidatePid <= 0) {
-              throw new CliError(
-                "Cannot inspect a review-lock recovery claim with an invalid owner.",
-                5,
-              );
-            }
-            if (codexProcessIsRunning(candidatePid)) {
-              liveClaims.push({
-                entry,
-                order: orderedOwner?.[1] ?? "",
-              });
-              continue;
-            }
-            rmSync(candidate, { force: true });
-          }
-          liveClaims.sort((left, right) =>
-            left.order.localeCompare(right.order) ||
-            left.entry.localeCompare(right.entry),
-          );
-          if (liveClaims[0].entry !== ownClaim) {
+          try {
+            renameSync(lockFile, capturedFile);
+            captured = true;
+          } catch (recoveryError) {
             throw new CliError(
-              "Another review command is already recovering the stale review lock.",
+              `The review lock changed while stale recovery was being claimed: ${recoveryError.message}`,
               5,
             );
           }
-          if (readFileSync(lockFile, "utf8") !== existingText) {
+          if (readFileSync(capturedFile, "utf8") !== existingText) {
+            renameSync(capturedFile, lockFile);
+            captured = false;
             throw new CliError(
               "The review lock changed while stale recovery was being claimed.",
               5,
             );
           }
-          rmSync(lockFile);
           writeFileSync(lockFile, `${JSON.stringify(owner)}\n`, {
             encoding: "utf8",
             mode: 0o600,
             flag: "wx",
           });
+          rmSync(capturedFile, { force: true });
+          captured = false;
           break;
+        } catch (recoveryError) {
+          if (captured) {
+            if (existsSync(lockFile)) rmSync(capturedFile, { force: true });
+            else renameSync(capturedFile, lockFile);
+          }
+          throw recoveryError;
         } finally {
           rmSync(recoveryFile, { force: true });
         }
@@ -3741,13 +3754,17 @@ async function startCommand(repo, options, env) {
   };
 }
 
-async function reviewCommand(repo, env) {
+async function withReviewLock(repo, operation) {
   const releaseReviewLock = acquireReviewLock(repo);
   try {
-    return await reviewCommandWithLock(repo, env);
+    return await operation();
   } finally {
     releaseReviewLock();
   }
+}
+
+async function reviewCommand(repo, env) {
+  return withReviewLock(repo, () => reviewCommandWithLock(repo, env));
 }
 
 async function reviewCommandWithLock(repo, env) {
@@ -4281,13 +4298,22 @@ function shellWords(text) {
 const LAUNCHER_OPTIONS_WITH_VALUES = new Set([
   "--cache",
   "--call",
+  "--cwd",
+  "--directory",
+  "--filter",
+  "--global-folder",
+  "--loglevel",
+  "--mutex",
   "--package",
   "--package-manager",
   "--prefix",
+  "--project",
+  "--python",
   "--registry",
   "--scope",
   "--userconfig",
   "--workspace",
+  "-C",
   "-c",
   "-p",
   "-w",
@@ -4406,6 +4432,14 @@ function testSelectorContext(command) {
   const npmSubcommand = executable === "npm"
     ? shellCommandAfterOptions(args)
     : null;
+  const packageLauncher = ["pnpm", "yarn"].includes(executable)
+    ? shellCommandAfterOptions(args)
+    : null;
+  const pythonLauncher = ["pdm", "pipenv", "poetry", "rye", "uv"].includes(
+    executable,
+  )
+    ? shellCommandAfterOptions(args)
+    : null;
   if (["bunx", "npx"].includes(executable)) {
     invocation = shellCommandAfterOptions(args);
     if (!invocation) return null;
@@ -4420,13 +4454,8 @@ function testSelectorContext(command) {
     executable = shellExecutableName(invocation.word);
     args = invocation.rest;
     selectorOffset = command.length - args.length;
-  } else if (
-    ["pnpm", "yarn"].includes(executable) &&
-    /^(?:dlx|exec)\s+/u.test(args)
-  ) {
-    invocation = shellCommandAfterOptions(
-      args.replace(/^(?:dlx|exec)\s+/u, ""),
-    );
+  } else if (["dlx", "exec"].includes(packageLauncher?.word)) {
+    invocation = shellCommandAfterOptions(packageLauncher.rest);
     if (!invocation) return null;
     resolvedWord = invocation.word;
     executable = shellExecutableName(invocation.word);
@@ -4439,13 +4468,8 @@ function testSelectorContext(command) {
     args = args.replace(/^-m\s+pytest(?:\s+|$)/u, "");
     executable = "pytest";
     selectorOffset = command.length - args.length;
-  } else if (
-    ["pdm", "pipenv", "poetry", "rye", "uv"].includes(executable) &&
-    /^run\s+/u.test(args)
-  ) {
-    invocation = shellCommandAfterOptions(
-      args.replace(/^run\s+(?:--\s+)?/u, ""),
-    );
+  } else if (pythonLauncher?.word === "run") {
+    invocation = shellCommandAfterOptions(pythonLauncher.rest);
     if (!invocation) return null;
     resolvedWord = invocation.word;
     executable = shellExecutableName(invocation.word);
@@ -5284,16 +5308,21 @@ export async function main(argv, runtime = {}) {
       const repo = repository(options.cwd ?? process.cwd());
       switch (command) {
         case "start":
-          result = await startCommand(repo, options, env);
+          result = await withReviewLock(repo, () =>
+            startCommand(repo, options, env));
           break;
         case "status":
-          result = { status: "active", state: reviewSummary(loadActive(repo)) };
+          result = await withReviewLock(repo, () => ({
+            status: "active",
+            state: reviewSummary(loadActive(repo)),
+          }));
           break;
         case "review":
           result = await reviewCommand(repo, env);
           break;
         case "finish":
-          result = finishCommand(repo, options);
+          result = await withReviewLock(repo, () =>
+            finishCommand(repo, options));
           break;
         default:
           throw new CliError(`Unknown command: ${command}`, 2);

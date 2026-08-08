@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import { once } from "node:events";
 import {
   chmodSync,
@@ -9,6 +8,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -2628,33 +2628,91 @@ test("review locks use portable exclusive creates and recover dead owners", (t) 
     "stale",
   );
   rmSync(path.join(storage, "review.lock.recovery"));
-  const staleText = readFileSync(path.join(storage, "review.lock"), "utf8");
-  const staleKey = createHash("sha256")
-    .update(staleText)
-    .digest("hex")
-    .slice(0, 16);
   const abandonedClaim = path.join(
     storage,
-    `review.lock.recovery.${staleKey}.1000000000.abandoned`,
+    "review.lock.recovery.1000000000.abandoned",
   );
   writeFileSync(
     abandonedClaim,
     `${JSON.stringify({ pid: 1_000_000_000, token: "abandoned" })}\n`,
   );
-  const laterClaim = path.join(
-    storage,
-    `review.lock.recovery.${staleKey}.99999999999999999999.${process.pid}.later`,
-  );
-  writeFileSync(
-    laterClaim,
-    `${JSON.stringify({ pid: process.pid, token: "later" })}\n`,
-  );
+  const capturedLock = `${abandonedClaim}.captured`;
+  renameSync(path.join(storage, "review.lock"), capturedLock);
   const releaseRecovered = acquireReviewLock(repo);
   assert.equal(existsSync(abandonedClaim), false);
-  assert.equal(existsSync(laterClaim), true);
-  rmSync(laterClaim);
+  assert.equal(existsSync(capturedLock), false);
   releaseRecovered();
   assert.equal(existsSync(path.join(storage, "review.lock")), false);
+
+  writeFileSync(
+    path.join(storage, "review.lock"),
+    `${JSON.stringify({ pid: 1_000_000_000, token: "stale-again" })}\n`,
+  );
+  const liveClaim = path.join(
+    storage,
+    `review.lock.recovery.${process.pid}.live`,
+  );
+  writeFileSync(
+    liveClaim,
+    `${JSON.stringify({ pid: process.pid, token: "live" })}\n`,
+  );
+  assert.throws(
+    () => acquireReviewLock(repo),
+    /already recovering the stale review lock/u,
+  );
+  assert.equal(existsSync(liveClaim), true);
+});
+
+test("lifecycle commands serialize on the review lock", (t) => {
+  const { directory, provider } = repositoryFixture(t);
+  const env = reviewEnvironment(provider, "unused");
+  const storage = git(
+    directory,
+    "rev-parse",
+    "--path-format=absolute",
+    "--git-path",
+    "codex-review-loop",
+  );
+  const repo = { storage };
+  let release = acquireReviewLock(repo);
+  let result = invoke(
+    directory,
+    env,
+    "start",
+    "--provider",
+    "custom",
+    "--base",
+    "HEAD",
+    "--outcome",
+    "Update the exported value",
+  );
+  assert.equal(result.status, 5);
+  assert.match(result.stderr, /Another review command is already running/u);
+  assert.equal(existsSync(path.join(storage, "active.json")), false);
+  release();
+
+  result = invoke(
+    directory,
+    env,
+    "start",
+    "--provider",
+    "custom",
+    "--base",
+    "HEAD",
+    "--outcome",
+    "Update the exported value",
+  );
+  assert.equal(result.status, 0, result.stderr);
+  release = acquireReviewLock(repo);
+  result = invoke(directory, env, "status");
+  assert.equal(result.status, 5);
+  result = invoke(directory, env, "finish", "--reason", "stopped");
+  assert.equal(result.status, 5);
+  assert.equal(existsSync(path.join(storage, "active.json")), true);
+  release();
+
+  result = invoke(directory, env, "finish", "--reason", "stopped");
+  assert.equal(result.status, 0, result.stderr);
 });
 
 test("commit-message rules reject workflow narration", () => {
@@ -2781,12 +2839,16 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     '- npm exec -c \'jest -t "reject per reviewer feedback"\'',
     '- npm exec --workspace packages/reviewer -- jest -t "reject per reviewer feedback"',
     '- npm --workspace packages/reviewer exec -- jest -t "reject per reviewer feedback"',
+    '- npm --loglevel silent exec -- jest -t "reject per reviewer feedback"',
     '- npm --workspace packages/reviewer exec -c \'jest -t "reject per reviewer feedback"\'',
     '- pnpm test -- --test-name-pattern "reject per reviewer feedback"',
     '- pnpm --filter workspace test -- --grep "per reviewer feedback"',
+    '- pnpm --filter reviewer exec jest -t "reject per reviewer feedback"',
     '- yarn test -- --grep "reject per reviewer feedback"',
+    '- yarn --cwd packages/reviewer exec jest -t "reject per reviewer feedback"',
     '- python -m pytest -k "reject per reviewer feedback"',
     '- uv run pytest -k "reject per reviewer feedback"',
+    '- uv --directory packages/reviewer run pytest -k "reject per reviewer feedback"',
     '- $ ./scripts/product-test "reject per reviewer feedback"',
   ]) {
     result = invoke(
