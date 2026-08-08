@@ -2688,7 +2688,7 @@ function removeStaleCodexHomes(parent) {
   }
 }
 
-function retainedCodexHomeCleanup(temporaryHome) {
+export function retainedCodexHomeCleanup(temporaryHome, removeHome = rmSync) {
   let cleaned = false;
   const handlers = new Map();
   const removeHandlers = () => {
@@ -2699,13 +2699,17 @@ function retainedCodexHomeCleanup(temporaryHome) {
   const cleanup = () => {
     if (cleaned) return;
     removeHandlers();
-    rmSync(temporaryHome, { recursive: true, force: true });
+    removeHome(temporaryHome, { recursive: true, force: true });
     cleaned = true;
   };
   for (const signal of ["SIGHUP", "SIGINT", "SIGTERM"]) {
     const handler = () => {
       try {
         cleanup();
+      } catch {
+        // A provider can briefly retain runtime files while its termination
+        // handler is still pending. Do not prevent later signal listeners from
+        // terminating that process tree; stale-home cleanup retries next run.
       } finally {
         if (process.listenerCount(signal) === 0) {
           process.kill(process.pid, signal);
@@ -4972,12 +4976,33 @@ function startsWithExplicitAiAuthorship(text) {
   );
 }
 
-function hasAiAttributionTrailer(message) {
-  const trailers = message.matchAll(new RegExp(
-    String.raw`^[\t ]*(?:[-*]\s+)?(?:[A-Za-z0-9][A-Za-z0-9-]*-(?:by|with)|${AI_AUTHORSHIP_ACTION_SOURCE})[\t ]*:(?<identity>[^\r\n]*(?:\r?\n[\t ]+[^\r\n]*)*)`,
-    "gimu",
-  ));
-  return [...trailers].some((trailer) => {
+function aiAttributionTrailers(message, keySource) {
+  return [
+    ...message.matchAll(new RegExp(
+      String.raw`^[\t ]*(?:[-*]\s+)?(?:${keySource})[\t ]*:(?<identity>[^\r\n]*(?:\r?\n[\t ]+[^\r\n]*)*)`,
+      "gimu",
+    )),
+  ];
+}
+
+function hasAiAttributionTrailer(subject, body) {
+  const attributedTrailers = aiAttributionTrailers(
+    `${subject}\n${body}`,
+    String.raw`[A-Za-z0-9][A-Za-z0-9-]*-(?:by|with)`,
+  ).map((trailer) => ({ broadIdentity: true, trailer }));
+  const bodyActionTrailers = aiAttributionTrailers(
+    body,
+    AI_AUTHORSHIP_ACTION_SOURCE,
+  ).map((trailer) => ({ broadIdentity: true, trailer }));
+  const subjectActionTrailers = aiAttributionTrailers(
+    subject,
+    AI_AUTHORSHIP_ACTION_SOURCE,
+  ).map((trailer) => ({ broadIdentity: false, trailer }));
+  return [
+    ...attributedTrailers,
+    ...bodyActionTrailers,
+    ...subjectActionTrailers,
+  ].some(({ broadIdentity, trailer }) => {
     const displayIdentity = trailer.groups.identity
       .replace(/\r?\n[\t ]+/gu, " ")
       .replace(/<[^<>]*>\s*$/u, "")
@@ -4994,7 +5019,7 @@ function hasAiAttributionTrailer(message) {
     return candidates.some(
       (identity) =>
         AI_ATTRIBUTION_TRAILER_IDENTITY.test(identity) ||
-        COMPOSITE_AI_PROVIDER_IDENTITY.test(identity) ||
+        (broadIdentity && COMPOSITE_AI_PROVIDER_IDENTITY.test(identity)) ||
         GENERIC_AI_TRAILER_IDENTITY.test(identity) ||
         GENERIC_AI_TRAILER_PHRASE.test(identity),
     );
@@ -5045,7 +5070,7 @@ function inspectCommitMessageWithPolicy(subject, body, options) {
       "message narrates or defends the review process instead of the product change",
     );
   }
-  if (hasAiAttributionTrailer(`${subject}\n${body}`)) {
+  if (hasAiAttributionTrailer(subject, body)) {
     issues.push("message contains an AI attribution trailer");
   }
   if (options.useDefaultSubjectFormat) {

@@ -2338,6 +2338,44 @@ process.stdin.resume();
   }
 });
 
+test("Codex-home cleanup failures do not swallow host interrupts", async (t) => {
+  const storage = mkdtempSync(
+    path.join(os.tmpdir(), "review-loop-signal-cleanup-"),
+  );
+  const fixture = path.join(storage, "cleanup-failure.mjs");
+  t.after(() => rmSync(storage, { recursive: true, force: true }));
+  writeFileSync(
+    fixture,
+    `import { retainedCodexHomeCleanup } from ${JSON.stringify(pathToFileURL(cli).href)};
+retainedCodexHomeCleanup("locked-home", () => {
+  throw new Error("provider still owns a runtime file");
+});
+process.once("SIGTERM", () => {
+  process.stdout.write("propagated\\n", () => process.exit(0));
+});
+process.stdout.write("ready\\n");
+process.stdin.resume();
+`,
+  );
+  const child = spawn(process.execPath, [fixture], {
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let stdout = "";
+  await new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString("utf8");
+      if (stdout.includes("ready\n")) resolve();
+    });
+  });
+  const exit = once(child, "exit");
+  child.kill("SIGTERM");
+  const [code, signal] = await exit;
+  assert.equal(code, 0);
+  assert.equal(signal, null);
+  assert.match(stdout, /propagated/u);
+});
+
 test("doctor reports Codex availability from the target safety preflight", (t) => {
   const { directory, provider } = repositoryFixture(t);
   const nested = path.join(directory, "nested");
@@ -3752,6 +3790,37 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     );
     assert.equal(result.status, 0, `${productSubject}\n${result.stdout}`);
   }
+
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
+    "fix: preserve Codex provider errors",
+    "--policy",
+    "Repository Conventional Commits policy",
+    "--policy-overrides",
+    "all",
+    "--product-terms",
+    "Codex is a provider implemented by the repository",
+  );
+  assert.equal(result.status, 0, result.stdout);
+
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
+    "Generated: Claude",
+    "--policy",
+    "Repository-specific commit format",
+    "--policy-overrides",
+    "all",
+    "--product-terms",
+    "Claude is a provider implemented by the repository",
+  );
+  assert.equal(result.status, 2);
+  assert.match(result.stdout, /AI attribution trailer/u);
 
   result = invoke(
     directory,
