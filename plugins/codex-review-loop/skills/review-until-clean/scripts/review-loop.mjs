@@ -807,17 +807,6 @@ function codexAvailability(env, context = undefined) {
         preferenceContext,
       },
     );
-    codexReviewPreferencesForReview(
-      state,
-      env,
-      undefined,
-      {
-        preferenceContext,
-        selectedLegacyProfile:
-          disabledFeatures.selectedLegacyPreferenceProfile,
-        preferenceConfigs: disabledFeatures.preferenceConfigs,
-      },
-    );
     return { available: true };
   } catch (error) {
     return { available: false, reason: error.message };
@@ -2840,12 +2829,32 @@ function readCodexCloudBundle(temporaryHome) {
   };
 }
 
+function codexPreferenceArgs(preferences = {}) {
+  const args = [];
+  if (preferences.model_provider) {
+    args.push(
+      "-c",
+      `model_provider=${tomlInlineValue(preferences.model_provider)}`,
+    );
+  }
+  const reviewModel = preferences.review_model ?? preferences.model;
+  if (reviewModel) args.push("--model", reviewModel);
+  if (preferences.model_reasoning_effort) {
+    args.push(
+      "-c",
+      `model_reasoning_effort=${tomlInlineValue(preferences.model_reasoning_effort)}`,
+    );
+  }
+  return args;
+}
+
 function runCodexManagedConfigProbe(
   root,
   env,
   temporaryHome,
   disabledFeatures,
   authOverrides = [],
+  preferences = {},
 ) {
   const missingSchema = path.join(
     temporaryHome,
@@ -2861,6 +2870,7 @@ function runCodexManagedConfigProbe(
     codexProjectUntrustedOverride(root),
   ];
   for (const override of authOverrides) args.push("-c", override);
+  args.push(...codexPreferenceArgs(preferences));
   for (const feature of disabledFeatures) args.push("--disable", feature);
   for (const override of codexRuntimePathOverrides(temporaryHome)) {
     args.push("-c", override);
@@ -3083,6 +3093,35 @@ export function codexFeaturesForReview(
       authenticated,
       options,
     );
+    const reviewPreferences =
+      managedInventory === runCodexManagedConfigProbe ||
+      Object.hasOwn(options, "preferenceContext")
+        ? codexReviewPreferencesForReview(
+            state,
+            env,
+            undefined,
+            {
+              preferenceContext: options.preferenceContext,
+              selectedLegacyProfile:
+                configuration.selectedLegacyPreferenceProfile,
+              retainedLegacyProfile: configuration.selectedLegacyProfile,
+              preferenceConfigs: configuration.preferenceConfigs,
+            },
+          )
+        : {};
+    if (
+      managedInventory === runCodexManagedConfigProbe &&
+      Object.keys(reviewPreferences).length > 0
+    ) {
+      runCodexManagedConfigProbe(
+        state.root,
+        probeEnv,
+        temporaryHome,
+        disabled,
+        authOverrides,
+        reviewPreferences,
+      );
+    }
     retained = Boolean(options.retainHome);
     return withCodexIsolationMetadata(disabled, {
       codexHome: retained ? temporaryHome : null,
@@ -3091,6 +3130,7 @@ export function codexFeaturesForReview(
       selectedLegacyPreferenceProfile:
         configuration.selectedLegacyPreferenceProfile,
       preferenceConfigs: configuration.preferenceConfigs,
+      reviewPreferences,
       usesReadOnlyDefaultPermissions:
         configuration.usesReadOnlyDefaultPermissions,
       authOverrides,
@@ -3132,20 +3172,7 @@ export function codexReviewArgs(
   )) {
     args.push("-c", override);
   }
-  const reviewModel = preferences.review_model ?? preferences.model;
-  if (preferences.model_provider) {
-    args.push(
-      "-c",
-      `model_provider=${tomlInlineValue(preferences.model_provider)}`,
-    );
-  }
-  if (reviewModel) args.push("--model", reviewModel);
-  if (preferences.model_reasoning_effort) {
-    args.push(
-      "-c",
-      `model_reasoning_effort=${tomlInlineValue(preferences.model_reasoning_effort)}`,
-    );
-  }
+  args.push(...codexPreferenceArgs(preferences));
   for (const feature of disabledFeatures) args.push("--disable", feature);
   args.push(
     "-c",
@@ -3181,18 +3208,7 @@ function providerInvocation(state, prompt, env, repo) {
       const temporaryHome = disabledFeatures.codexHome;
       const cleanupCodexHome = disabledFeatures.cleanupCodexHome;
       try {
-        const preferences = codexReviewPreferencesForReview(
-          state,
-          env,
-          undefined,
-          {
-            preferenceContext,
-            selectedLegacyProfile:
-              disabledFeatures.selectedLegacyPreferenceProfile,
-            retainedLegacyProfile: disabledFeatures.selectedLegacyProfile,
-            preferenceConfigs: disabledFeatures.preferenceConfigs,
-          },
-        );
+        const preferences = disabledFeatures.reviewPreferences;
         return {
           command: "codex",
           args: codexReviewArgs(
@@ -3980,7 +3996,7 @@ async function reviewCommandWithLock(repo, env) {
   };
 }
 
-const AI_ATTRIBUTION_IDENTITY_SOURCE = String.raw`(?:ai|artificial intelligence|llm|language model|assistant|agent|bot|reviewer|codex|claude|gemini|chatgpt|gpt(?:-\d+(?:\.\d+)*)?|open[\s-]?ai|anthropic|opencode|(?:github[\s-]+)?copilot|cursor|windsurf|aider|devin|codeium|tabnine|qodo|amazon\s+q|sourcegraph\s+cody)`;
+const AI_ATTRIBUTION_IDENTITY_SOURCE = String.raw`(?:ai|artificial intelligence|llm|language model|assistant|agent|bot|reviewer|codex|claude|gemini|chatgpt|gpt(?:-\d+(?:\.\d+)*)?|open[\s-]?ai|anthropic|opencode|(?:github[\s-]+)?copilot|cursor|windsurf|aider|devin|codeium|tabnine|qodo|amazon\s+q|sourcegraph\s+cody|mistral|mixtral|deepseek|qwen|grok|xai|perplexity|cohere|llama|kimi|moonshot|minimax)`;
 const WORKFLOW_ACTION_SOURCE = String.raw`(?:address(?:es|ed|ing)?|appl(?:y|ies|ied|ying)|fix(?:es|ed|ing)?|resolv(?:e|es|ed|ing)|handl(?:e|es|ed|ing)|incorporat(?:e|es|ed|ing)|implement(?:s|ed|ing)?|clos(?:e|es|ed|ing)|clear(?:s|ed|ing)?|tackl(?:e|es|ed|ing)|satisf(?:y|ies|ied|ying)|(?:respond|react)(?:s|ed|ing)?\s+to)`;
 const WORKFLOW_ARTIFACT_SOURCE = String.raw`(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance)`;
 
@@ -4176,8 +4192,15 @@ function commitSection(body, name) {
 function isVerbatimVerificationCommand(line, allowProductTerms = false) {
   const trimmed = line.trim();
   const bullet = trimmed.match(/^[-*]\s+(.+)/u);
+  const command = bullet?.[1] ?? trimmed;
+  if (
+    hasIncompleteShellConstruct(command) &&
+    !hasShellContinuationMarker(command)
+  ) {
+    return false;
+  }
   return isCommandShapedVerification(
-    bullet?.[1] ?? trimmed,
+    command,
     allowProductTerms,
   );
 }
@@ -4582,6 +4605,20 @@ function escapeRegularExpression(text) {
   return text.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }
 
+function maskGenericTestSelectors(command) {
+  if (!/(?:^|\s)(?:check|test|tests|verify)(?=\s|$)/iu.test(command)) {
+    return command;
+  }
+  const selector = new RegExp(
+    String.raw`(?<prefix>(?:^|\s)(?:-D(?:test|tests|testcase|testname|testpattern)|--?(?:example|filter|focus|grep|spec|tests?|test[-_]?name[-_]?pattern|test[-_]?pattern))(?:=|\s+))(?<value>"(?:\\.|[^"])*"|'[^']*'|\S+)`,
+    "giu",
+  );
+  return command.replace(
+    selector,
+    (...args) => `${args.at(-1).prefix}"product test selector"`,
+  );
+}
+
 function commandAttributionProse(text, allowProductTerms) {
   if (!allowProductTerms) return text;
   const { prefix, command } = shellCommandWithPrefix(text);
@@ -4619,6 +4656,7 @@ function commandAttributionProse(text, allowProductTerms) {
     }
     withoutSelectors = `${command.slice(0, selectorContext.offset)}${selectable}`;
   }
+  withoutSelectors = maskGenericTestSelectors(withoutSelectors);
   return `${prefix}${withoutSelectors}`;
 }
 
@@ -4835,6 +4873,42 @@ function verbatimVerificationCommandText(line) {
   return command.replace(/^\$\s+/u, "");
 }
 
+function hasIncompleteShellConstruct(line) {
+  const command = verbatimVerificationCommandText(line);
+  if (/(?:^|\s)(?:\d*(?:>>?|<<?)|&>>?)\s*$/u.test(command)) return true;
+  let quote = null;
+  let escaped = false;
+  let parentheses = 0;
+  let parameters = 0;
+  for (let index = 0; index < command.length; index += 1) {
+    const character = command[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (character === quote) quote = null;
+      continue;
+    }
+    if (["'", '"', "`"].includes(character)) {
+      quote = character;
+    } else if (character === "(") {
+      parentheses += 1;
+    } else if (character === ")" && parentheses > 0) {
+      parentheses -= 1;
+    } else if (character === "{" && command[index - 1] === "$") {
+      parameters += 1;
+    } else if (character === "}" && parameters > 0) {
+      parameters -= 1;
+    }
+  }
+  return quote !== null || parentheses > 0 || parameters > 0;
+}
+
 function hasShellContinuationMarker(line) {
   let trimmed = line.trim();
   const bullet = trimmed.match(/^[-*]\s+(.+)/u);
@@ -4914,7 +4988,7 @@ const AI_ATTRIBUTION_TRAILER_IDENTITY = new RegExp(
   "iu",
 );
 const COMPOSITE_AI_PROVIDER_IDENTITY = new RegExp(
-  String.raw`\b(?:codex|gemini|chatgpt|gpt(?:-\d+(?:\.\d+)*)?|open[\s-]?ai|anthropic|opencode|(?:github[\s-]+)?copilot|cursor|windsurf|aider|codeium|tabnine|qodo|amazon\s+q|sourcegraph\s+cody)\b`,
+  String.raw`\b(?:codex|gemini|chatgpt|gpt(?:-\d+(?:\.\d+)*)?|open[\s-]?ai|anthropic|opencode|(?:github[\s-]+)?copilot|cursor|windsurf|aider|codeium|tabnine|qodo|amazon\s+q|sourcegraph\s+cody|mistral|mixtral|deepseek|qwen|grok|xai|perplexity|cohere|llama|kimi|moonshot|minimax)\b`,
   "iu",
 );
 const GENERIC_AI_TRAILER_IDENTITY = /^(?:AI|LLM)\b/iu;

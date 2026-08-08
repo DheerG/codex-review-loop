@@ -2397,6 +2397,58 @@ test("doctor reports Codex availability from the target safety preflight", (t) =
   );
 });
 
+test("Codex readiness validates copied review preferences", (t) => {
+  const { directory } = repositoryFixture(t);
+  const bin = path.join(directory, "bin");
+  const configuredHome = path.join(directory, "codex-home");
+  mkdirSync(bin);
+  mkdirSync(configuredHome);
+  writeFileSync(
+    path.join(configuredHome, "config.toml"),
+    'model_reasoning_effort = "banana"\n',
+  );
+  const codex = path.join(bin, "codex");
+  writeFileSync(
+    codex,
+    `#!${process.execPath}
+const args = process.argv.slice(2);
+if (args[0] === "--version") {
+  process.stdout.write("codex-cli 1.0.0\\n");
+  process.exit(0);
+}
+if (args[0] === "features" && args[1] === "list") {
+  process.stdout.write("shell_tool stable true\\n");
+  process.exit(0);
+}
+if (args.includes('model_reasoning_effort="banana"')) {
+  process.stderr.write("invalid value banana for model_reasoning_effort\\n");
+  process.exit(2);
+}
+const schema = args[args.indexOf("--output-schema") + 1] ?? "missing-schema";
+process.stderr.write("Failed to read output schema file " + schema + "\\n");
+process.exit(1);
+`,
+  );
+  chmodSync(codex, 0o755);
+  const result = execute(
+    process.execPath,
+    [cli, "doctor", "--cwd", directory, "--json"],
+    root,
+    {
+      ...process.env,
+      CODEX_HOME: configuredHome,
+      PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+    },
+  );
+  assert.ok([0, 2].includes(result.status), result.stderr);
+  const report = JSON.parse(result.stdout);
+  assert.equal(report.providers.codex, false);
+  assert.match(
+    report.providerDiagnostics.codex,
+    /model_reasoning_effort|banana/u,
+  );
+});
+
 test("resumed reviews refresh a stale persisted repository root", (t) => {
   const { directory, provider } = repositoryFixture(t);
   const repositoryRoot = git(directory, "rev-parse", "--show-toplevel");
@@ -2887,6 +2939,7 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     '- python -m pytest -k "reject per reviewer feedback"',
     '- uv run pytest -k "reject per reviewer feedback"',
     '- uv --directory packages/reviewer run pytest -k "reject per reviewer feedback"',
+    '- mvn -Dtest="reject per reviewer feedback" test',
     '- $ ./scripts/product-test "reject per reviewer feedback"',
   ]) {
     result = invoke(
@@ -2936,6 +2989,8 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "AI fixed this bug",
     "Codex supplied this patch",
     "Claude contributed this implementation",
+    "Mistral generated this patch",
+    "DeepSeek authored these changes",
     "Preserve retries per Codex",
     "Preserve retries on reviewer advice",
     "Preserve retries at the reviewer’s request",
@@ -3279,6 +3334,8 @@ test("check-commit-message validates a proposed repair commit", (t) => {
 
   for (const incompleteVerification of [
     "- npm test &&",
+    "- npm test >",
+    '- npm test "unclosed argument',
     `- npm test ${"\\"}`,
     "- npm test &&\n\nRationale:\nThe command must remain complete.",
   ]) {
