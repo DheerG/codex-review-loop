@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { once } from "node:events";
 import {
   chmodSync,
@@ -2627,7 +2628,21 @@ test("review locks use portable exclusive creates and recover dead owners", (t) 
     "stale",
   );
   rmSync(path.join(storage, "review.lock.recovery"));
+  const staleText = readFileSync(path.join(storage, "review.lock"), "utf8");
+  const staleKey = createHash("sha256")
+    .update(staleText)
+    .digest("hex")
+    .slice(0, 16);
+  const abandonedClaim = path.join(
+    storage,
+    `review.lock.recovery.${staleKey}.1000000000.abandoned`,
+  );
+  writeFileSync(
+    abandonedClaim,
+    `${JSON.stringify({ pid: 1_000_000_000, token: "abandoned" })}\n`,
+  );
   const releaseRecovered = acquireReviewLock(repo);
+  assert.equal(existsSync(abandonedClaim), false);
   releaseRecovered();
   assert.equal(existsSync(path.join(storage, "review.lock")), false);
 });
@@ -2747,6 +2762,7 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     '- npm run-script test -- --grep "per reviewer feedback"',
     '- npm exec -- jest -t "reject per reviewer feedback"',
     '- npm exec -c \'jest -t "reject per reviewer feedback"\'',
+    '- npm exec --workspace packages/reviewer -- jest -t "reject per reviewer feedback"',
     '- pnpm test -- --test-name-pattern "reject per reviewer feedback"',
     '- pnpm --filter workspace test -- --grep "per reviewer feedback"',
     '- yarn test -- --grep "reject per reviewer feedback"',
@@ -3081,6 +3097,20 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     `${narrativeCommitBody}\n- node --test \\\n${longContinuation}`,
   );
   assert.equal(result.status, 0, result.stderr);
+
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
+    "Preserve colon-ended command continuations",
+    "--body",
+    narrativeCommitBody.replace(
+      "- npm test -- retry\n- npm run validate",
+      "- npm run \\\n  test:",
+    ),
+  );
+  assert.equal(result.status, 0, result.stdout);
 
   for (const operatorContinuation of [
     `  && node --test --test-name-pattern="${"operator-led verification evidence ".repeat(5).trim()}"`,

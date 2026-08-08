@@ -428,21 +428,61 @@ export function acquireReviewLock(repo) {
         Number.isSafeInteger(existing.pid) &&
         !codexProcessIsRunning(existing.pid)
       ) {
-        const recoveryFile = `${lockFile}.recovery`;
-        try {
-          writeFileSync(recoveryFile, `${JSON.stringify(owner)}\n`, {
-            encoding: "utf8",
-            mode: 0o600,
-            flag: "wx",
-          });
-        } catch (recoveryError) {
-          if (recoveryError?.code !== "EEXIST") throw recoveryError;
-          throw new CliError(
-            "Another review command is already recovering the stale review lock.",
-            5,
-          );
+        const legacyRecoveryFile = `${lockFile}.recovery`;
+        if (existsSync(legacyRecoveryFile)) {
+          let legacyOwner;
+          try {
+            legacyOwner = JSON.parse(readFileSync(legacyRecoveryFile, "utf8"));
+          } catch (recoveryError) {
+            throw new CliError(
+              `Cannot inspect the existing review-lock recovery claim: ${recoveryError.message}`,
+              5,
+            );
+          }
+          if (codexProcessIsRunning(legacyOwner.pid)) {
+            throw new CliError(
+              "Another review command is already recovering the stale review lock.",
+              5,
+            );
+          }
+          rmSync(legacyRecoveryFile, { force: true });
         }
+        const staleKey = createHash("sha256")
+          .update(existingText)
+          .digest("hex")
+          .slice(0, 16);
+        const recoveryPrefix = `${path.basename(lockFile)}.recovery.${staleKey}.`;
+        const recoveryFile = path.join(
+          repo.storage,
+          `${recoveryPrefix}${process.pid}.${token}`,
+        );
+        writeFileSync(recoveryFile, `${JSON.stringify(owner)}\n`, {
+          encoding: "utf8",
+          mode: 0o600,
+          flag: "wx",
+        });
         try {
+          for (const entry of readdirSync(repo.storage)) {
+            if (!entry.startsWith(recoveryPrefix)) continue;
+            const candidate = path.join(repo.storage, entry);
+            if (candidate === recoveryFile) continue;
+            const candidatePid = Number(
+              entry.slice(recoveryPrefix.length).match(/^(\d+)\./u)?.[1],
+            );
+            if (!Number.isSafeInteger(candidatePid) || candidatePid <= 0) {
+              throw new CliError(
+                "Cannot inspect a review-lock recovery claim with an invalid owner.",
+                5,
+              );
+            }
+            if (codexProcessIsRunning(candidatePid)) {
+              throw new CliError(
+                "Another review command is already recovering the stale review lock.",
+                5,
+              );
+            }
+            rmSync(candidate, { force: true });
+          }
           if (readFileSync(lockFile, "utf8") !== existingText) {
             throw new CliError(
               "The review lock changed while stale recovery was being claimed.",
@@ -4222,11 +4262,18 @@ function shellWords(text) {
 }
 
 const LAUNCHER_OPTIONS_WITH_VALUES = new Set([
+  "--cache",
   "--call",
   "--package",
   "--package-manager",
+  "--prefix",
+  "--registry",
+  "--scope",
+  "--userconfig",
+  "--workspace",
   "-c",
   "-p",
+  "-w",
 ]);
 
 function shellCommandAfterOptions(text) {
@@ -4677,7 +4724,7 @@ function verificationEvidenceLines(
       if (boundary) section = null;
       continue;
     }
-    if (commandContinues && /^\s+\S/u.test(line) && !boundary) {
+    if (commandContinues && /^\s+\S/u.test(line)) {
       if (
         isVerbatimVerificationContinuation(
           line,
