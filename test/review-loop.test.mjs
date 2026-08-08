@@ -1399,7 +1399,7 @@ test("Codex config reads reject oversized and non-regular inputs", (t) => {
   }
 });
 
-test("Codex feature probing adapts to supported flags and fails closed", () => {
+test("Codex feature probing adapts to supported flags and fails closed", async () => {
   assert.equal(codexPreflightTimeout({}), 60_000);
   assert.equal(
     codexPreflightTimeout({ CODEX_REVIEW_LOOP_TIMEOUT_MS: "2500" }),
@@ -1476,7 +1476,7 @@ obsolete_external_tool             removed            true
   assert.equal(parsed.has("multi_agent_v2"), false);
 
   const calls = [];
-  const disabled = codexFeaturesForReview(
+  const disabled = await codexFeaturesForReview(
     { root: "/tmp/repository", isolateCodexConfig: false },
     {},
     undefined,
@@ -1519,7 +1519,7 @@ obsolete_external_tool             removed            true
   assert.deepEqual(calls, [[], disabled]);
   assert.doesNotMatch(codexReviewArgs(false, [], disabled).join(" "), /multi_agent_v2/u);
 
-  assert.throws(
+  await assert.rejects(
     () =>
       codexFeaturesForReview(
         { root: "/tmp/repository", isolateCodexConfig: false },
@@ -1536,7 +1536,7 @@ obsolete_external_tool             removed            true
     /Cannot safely disable managed Codex features: hooks/u,
   );
 
-  assert.throws(
+  await assert.rejects(
     () =>
       codexFeaturesForReview(
         {
@@ -1564,7 +1564,7 @@ obsolete_external_tool             removed            true
     /cloud-managed Codex config.*features\.hooks/u,
   );
 
-  assert.throws(
+  await assert.rejects(
     () =>
       codexFeaturesForReview(
         {
@@ -1592,7 +1592,7 @@ obsolete_external_tool             removed            true
     /cloud-managed Codex config.*log_dir/u,
   );
 
-  assert.throws(
+  await assert.rejects(
     () =>
       codexFeaturesForReview(
         {
@@ -1621,7 +1621,7 @@ obsolete_external_tool             removed            true
     /Cannot safely override MCP servers from cloud-managed Codex config/u,
   );
 
-  assert.throws(
+  await assert.rejects(
     () =>
       codexFeaturesForReview(
         {
@@ -1661,7 +1661,7 @@ obsolete_external_tool             removed            true
   );
 
   const mergedProfileMcpServers = ["stale-profile-server"];
-  const mergedProfileFeatures = codexFeaturesForReview(
+  const mergedProfileFeatures = await codexFeaturesForReview(
     {
       root: "/tmp/repository",
       isolateCodexConfig: true,
@@ -1718,7 +1718,7 @@ obsolete_external_tool             removed            true
     { model: "gpt-profile" },
   );
 
-  const nativePreferencePrecedence = codexFeaturesForReview(
+  const nativePreferencePrecedence = await codexFeaturesForReview(
     {
       root: "/tmp/repository",
       isolateCodexConfig: false,
@@ -1784,7 +1784,7 @@ obsolete_external_tool             removed            true
   );
 
   const cloudSelectedSafeProfileMcpServers = ["writer"];
-  const cloudSelectedSafeProfileFeatures = codexFeaturesForReview(
+  const cloudSelectedSafeProfileFeatures = await codexFeaturesForReview(
     {
       root: "/tmp/repository",
       isolateCodexConfig: true,
@@ -1832,7 +1832,7 @@ obsolete_external_tool             removed            true
     (_, index) =>
       `[profiles.work.mcp_servers.server_${index}_${"x".repeat(24)}]\ncommand = "reader"`,
   ).join("\n");
-  assert.throws(
+  await assert.rejects(
     () =>
       codexFeaturesForReview(
         {
@@ -1873,7 +1873,7 @@ obsolete_external_tool             removed            true
     /MCP inventory is too large to disable safely/u,
   );
 
-  assert.throws(
+  await assert.rejects(
     () =>
       codexFeaturesForReview(
         {
@@ -1916,7 +1916,7 @@ obsolete_external_tool             removed            true
   );
 
   const userIgnoredMcpServers = [];
-  const separatedProfileFeatures = codexFeaturesForReview(
+  const separatedProfileFeatures = await codexFeaturesForReview(
     {
       root: "/tmp/repository",
       isolateCodexConfig: false,
@@ -1978,7 +1978,7 @@ obsolete_external_tool             removed            true
     { model: "gpt-profile" },
   );
 
-  assert.throws(
+  await assert.rejects(
     () =>
       codexFeaturesForReview(
         {
@@ -2011,7 +2011,7 @@ obsolete_external_tool             removed            true
     /highest-priority cloud config/u,
   );
 
-  const permissionProfileFeatures = codexFeaturesForReview(
+  const permissionProfileFeatures = await codexFeaturesForReview(
     { root: "/tmp/repository", isolateCodexConfig: true },
     {},
     undefined,
@@ -2038,7 +2038,7 @@ obsolete_external_tool             removed            true
     { usesReadOnlyDefaultPermissions: true },
   );
   assert.equal(permissionProfileArgs.includes("--sandbox"), false);
-  const activePermissionProfileFeatures = codexFeaturesForReview(
+  const activePermissionProfileFeatures = await codexFeaturesForReview(
     {
       root: "/tmp/repository",
       isolateCodexConfig: true,
@@ -2074,7 +2074,7 @@ obsolete_external_tool             removed            true
 });
 
 test(
-  "Codex synchronous preflight enforces its deadline with an unresponsive child",
+  "Codex preflight enforces its deadline with an unresponsive child",
   { skip: process.platform === "win32" },
   (t) => {
     const { directory } = repositoryFixture(t);
@@ -2110,12 +2110,89 @@ test(
   },
 );
 
-test("isolated Codex feature probing skips user config without losing invocation identity", () => {
+test(
+  "host signals terminate Codex preflight process trees",
+  { skip: process.platform === "win32" },
+  async (t) => {
+    const { directory } = repositoryFixture(t);
+    const bin = path.join(directory, "bin");
+    const descendantPidFile = path.join(directory, "preflight-descendant.pid");
+    mkdirSync(bin);
+    const codex = path.join(bin, "codex");
+    writeFileSync(
+      codex,
+      `#!${process.execPath}
+const { spawn } = require("node:child_process");
+const { writeFileSync } = require("node:fs");
+const descendant = spawn(process.execPath, ["-e", "Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0)"], {
+  stdio: "ignore",
+});
+writeFileSync(process.env.DESCENDANT_PID_FILE, String(descendant.pid));
+Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);
+`,
+    );
+    chmodSync(codex, 0o755);
+    const host = spawn(
+      process.execPath,
+      [cli, "doctor", "--cwd", directory, "--json"],
+      {
+        env: {
+          ...process.env,
+          DESCENDANT_PID_FILE: descendantPidFile,
+          PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+        },
+        stdio: "ignore",
+      },
+    );
+    let descendantPid;
+    t.after(() => {
+      for (const pid of [host.pid, descendantPid]) {
+        if (!pid) continue;
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch (error) {
+          if (error?.code !== "ESRCH") throw error;
+        }
+      }
+    });
+    const readyDeadline = Date.now() + 5_000;
+    while (!existsSync(descendantPidFile) && Date.now() < readyDeadline) {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+    }
+    assert.equal(existsSync(descendantPidFile), true);
+    descendantPid = Number(readFileSync(descendantPidFile, "utf8"));
+    const exit = once(host, "exit");
+    host.kill("SIGTERM");
+    const [code, signal] = await exit;
+    assert.equal(code, null);
+    assert.equal(signal, "SIGTERM");
+    const cleanupDeadline = Date.now() + 2_000;
+    while (Date.now() < cleanupDeadline) {
+      try {
+        process.kill(descendantPid, 0);
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+      } catch (error) {
+        if (error?.code === "ESRCH") break;
+        throw error;
+      }
+    }
+    assert.throws(
+      () => process.kill(descendantPid, 0),
+      (error) => error?.code === "ESRCH",
+    );
+  },
+);
+
+test("isolated Codex feature probing skips user config without losing invocation identity", async () => {
   const storage = mkdtempSync(path.join(os.tmpdir(), "review-loop-git-state-"));
   const authenticatedHome = path.join(storage, "authenticated-codex-home");
   mkdirSync(authenticatedHome);
   const authoritativeAuth = path.join(authenticatedHome, "auth.json");
-  writeFileSync(authoritativeAuth, "original credential", { mode: 0o600 });
+  const nonRotatingIdentity = JSON.stringify({
+    auth_mode: "apikey",
+    OPENAI_API_KEY: "test-api-key",
+  });
+  writeFileSync(authoritativeAuth, nonRotatingIdentity, { mode: 0o600 });
   const env = {
     CODEX_HOME: authenticatedHome,
     MANAGED_IDENTITY: "cloud-bundle",
@@ -2134,7 +2211,7 @@ test("isolated Codex feature probing skips user config without losing invocation
       sharedIdentityHome,
     );
     const sharedIdentity = path.join(sharedIdentityHome, "auth.json");
-    assert.equal(readFileSync(sharedIdentity, "utf8"), "original credential");
+    assert.equal(readFileSync(sharedIdentity, "utf8"), nonRotatingIdentity);
     const sourceDetails = lstatSync(authoritativeAuth);
     const sharedDetails = lstatSync(sharedIdentity);
     assert.equal(
@@ -2144,9 +2221,32 @@ test("isolated Codex feature probing skips user config without losing invocation
     );
     writeFileSync(sharedIdentity, "refreshed credential");
     assert.equal(readFileSync(sharedIdentity, "utf8"), "refreshed credential");
-    assert.equal(readFileSync(authoritativeAuth, "utf8"), "original credential");
+    assert.equal(readFileSync(authoritativeAuth, "utf8"), nonRotatingIdentity);
     rmSync(sharedIdentityHome, { recursive: true, force: true });
-    assert.equal(readFileSync(authoritativeAuth, "utf8"), "original credential");
+    assert.equal(readFileSync(authoritativeAuth, "utf8"), nonRotatingIdentity);
+
+    const oauthProbeHome = path.join(storage, "oauth-probe-home");
+    mkdirSync(oauthProbeHome);
+    writeFileSync(
+      authoritativeAuth,
+      JSON.stringify({
+        auth_mode: "chatgpt",
+        tokens: { refresh_token: "rotating-token" },
+      }),
+    );
+    assert.throws(
+      () => shareCodexIdentityForProbe(
+        {
+          root: "/tmp/repository",
+          isolateCodexConfig: true,
+          codexLegacyProfiles: false,
+        },
+        env,
+        oauthProbeHome,
+      ),
+      /OAuth credentials can rotate|OS keyring/u,
+    );
+    writeFileSync(authoritativeAuth, nonRotatingIdentity);
 
     const keyringHome = path.join(storage, "keyring-codex-home");
     const keyringProbeHome = path.join(storage, "keyring-probe-home");
@@ -2182,7 +2282,7 @@ test("isolated Codex feature probing skips user config without losing invocation
     mkdirSync(staleHome);
     mkdirSync(liveHome);
     writeFileSync(path.join(staleHome, "auth.json"), "stale credential");
-    const disabled = codexFeaturesForReview(
+    const disabled = await codexFeaturesForReview(
       { root: "/tmp/repository", isolateCodexConfig: true },
       env,
       storage,
@@ -2207,7 +2307,7 @@ test("isolated Codex feature probing skips user config without losing invocation
     );
     assert.deepEqual(disabled, ["codex_hooks", "apps", "multi_agent"]);
     assert.equal(env.CODEX_HOME, authenticatedHome);
-    assert.equal(readFileSync(authoritativeAuth, "utf8"), "original credential");
+    assert.equal(readFileSync(authoritativeAuth, "utf8"), nonRotatingIdentity);
     assert.equal(existsSync(probeHome), false);
     assert.equal(existsSync(staleHome), false);
     assert.equal(existsSync(liveHome), true);
@@ -2219,7 +2319,7 @@ test("isolated Codex feature probing skips user config without losing invocation
     };
     let retainedFeatures;
     try {
-      retainedFeatures = codexFeaturesForReview(
+      retainedFeatures = await codexFeaturesForReview(
         { root: "/tmp/repository", isolateCodexConfig: true },
         env,
         storage,
@@ -2298,7 +2398,7 @@ test("retained Codex homes are deleted when the host is interrupted", async (t) 
   writeFileSync(
     fixture,
     `import { codexFeaturesForReview } from ${JSON.stringify(pathToFileURL(cli).href)};
-const retained = codexFeaturesForReview(
+const retained = await codexFeaturesForReview(
   { root: "/tmp/repository", isolateCodexConfig: true },
   {},
   ${JSON.stringify(storage)},
@@ -3948,6 +4048,8 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "Co-authored-by: AI Coding Assistant <bot@example.com>",
     "Co-authored-by: ai Pair Programmer <bot@example.com>",
     "Co-authored-by: llm Pair Programmer <bot@example.com>",
+    "Co-authored-by: Foo AI Agent <bot@example.com>",
+    "Co-authored-by: Claude Doe (AI agent) <bot@example.com>",
   ]) {
     result = invoke(
       directory,

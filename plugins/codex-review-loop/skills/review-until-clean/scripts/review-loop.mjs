@@ -70,7 +70,6 @@ const CODEX_REVIEW_RETAINED_FEATURES = new Set([
 ]);
 const GIT_REVISION_SUFFIX_SOURCE = String.raw`(?:\^\{(?:commit|tree|blob|tag|object)?\}|~\d*|\^\d*)`;
 const SKILL_SCRIPT = fileURLToPath(import.meta.url);
-const INTERNAL_BOUNDED_CODEX_RUN = "__bounded-codex-run";
 
 function codexFeatureRequiresIsolation(feature) {
   return !CODEX_REVIEW_RETAINED_FEATURES.has(feature);
@@ -85,71 +84,10 @@ class CliError extends Error {
   }
 }
 
-async function boundedCodexRun(timeoutMs, args) {
-  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) return 2;
-  const child = spawn("codex", args, {
-    detached: process.platform !== "win32",
-    stdio: ["inherit", "inherit", "inherit"],
-    windowsHide: true,
-  });
-  let settled = false;
-  let deadline;
-  const handlers = new Map();
-  const removeHandlers = () => {
-    for (const [signal, handler] of handlers) {
-      process.removeListener(signal, handler);
-    }
-    deadline?.removeEventListener("abort", terminate);
-  };
-  const terminate = () => {
-    if (settled) return;
-    if (process.platform === "win32") {
-      spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
-        stdio: "ignore",
-        windowsHide: true,
-      });
-    } else {
-      try {
-        process.kill(-child.pid, "SIGKILL");
-      } catch (error) {
-        if (error?.code !== "ESRCH") throw error;
-      }
-    }
-    process.exit(124);
-  };
-  for (const signal of ["SIGHUP", "SIGINT", "SIGTERM"]) {
-    handlers.set(signal, terminate);
-    process.once(signal, terminate);
-  }
-  deadline = AbortSignal.timeout(timeoutMs);
-  deadline.addEventListener("abort", terminate, { once: true });
-  return new Promise((resolve) => {
-    child.once("error", (error) => {
-      settled = true;
-      removeHandlers();
-      process.stderr.write(`codex could not run: ${error.message}\n`);
-      resolve(127);
-    });
-    child.once("exit", (code, signal) => {
-      settled = true;
-      removeHandlers();
-      resolve(code ?? (signal ? 1 : 0));
-    });
-  });
-}
-
 function run(command, args, options = {}) {
-  const boundedCodex = command === "codex" && options.timeoutMs;
   const result = spawnSync(
-    boundedCodex ? process.execPath : command,
-    boundedCodex
-      ? [
-          SKILL_SCRIPT,
-          INTERNAL_BOUNDED_CODEX_RUN,
-          String(Math.max(1, Math.floor(options.timeoutMs * 0.9))),
-          ...args,
-        ]
-      : args,
+    command,
+    args,
     {
       cwd: options.cwd,
       encoding: "utf8",
@@ -164,9 +102,6 @@ function run(command, args, options = {}) {
   if (result.error) {
     throw new CliError(`${command} could not run: ${result.error.message}`, 2);
   }
-  if (boundedCodex && result.status === 124) {
-    throw new CliError(`${command} could not run: timed out.`, 2);
-  }
   if (!options.allowFailure && result.status !== 0) {
     const detail = (result.stderr || result.stdout || "").trim();
     throw new CliError(
@@ -176,6 +111,38 @@ function run(command, args, options = {}) {
   }
   return {
     status: result.status ?? 1,
+    stdout: result.stdout ?? "",
+    stderr: result.stderr ?? "",
+  };
+}
+
+async function runCodex(args, options = {}) {
+  const result = await captureProcess(
+    { command: "codex", args, input: options.input },
+    {
+      cwd: options.cwd,
+      env: options.env ?? process.env,
+      timeoutMs: options.timeoutMs,
+      maxCaptureBytes: MAX_CAPTURE_BYTES,
+    },
+  );
+  await result.childExited;
+  if (result.kind === "timeout") {
+    throw new CliError("codex could not run: timed out.", 2);
+  }
+  if (result.kind === "unavailable") {
+    throw new CliError(`codex could not run: ${result.stderr.trim()}`, 2);
+  }
+  const status = result.code ?? 1;
+  if (!options.allowFailure && (!result.ok || status !== 0)) {
+    const detail = (result.stderr || result.stdout || "").trim();
+    throw new CliError(
+      `codex ${args.join(" ")} failed${detail ? `: ${detail}` : ""}`,
+      2,
+    );
+  }
+  return {
+    status,
     stdout: result.stdout ?? "",
     stderr: result.stderr ?? "",
   };
@@ -784,7 +751,7 @@ function executableOnPath(name, env = process.env) {
   return null;
 }
 
-function codexAvailability(env, context = undefined) {
+async function codexAvailability(env, context = undefined) {
   if (!executableOnPath("codex", env)) {
     return { available: false, reason: "executable not found" };
   }
@@ -793,9 +760,10 @@ function codexAvailability(env, context = undefined) {
     isolateCodexConfig: Boolean(context?.isolateCodexConfig),
   };
   try {
+    await prepareCodexState(state, env);
     const mcpServers = codexMcpServersForReview(state, env);
     const preferenceContext = codexReviewPreferenceContext(state, env);
-    const disabledFeatures = codexFeaturesForReview(
+    await codexFeaturesForReview(
       state,
       env,
       context?.storage,
@@ -813,13 +781,15 @@ function codexAvailability(env, context = undefined) {
   }
 }
 
-function availableProviders(
+async function availableProviders(
   env = process.env,
   codexContext = undefined,
-  codexStatus = codexAvailability(env, codexContext),
+  codexStatus = undefined,
 ) {
+  const resolvedCodexStatus =
+    codexStatus ?? await codexAvailability(env, codexContext);
   return {
-    codex: codexStatus.available,
+    codex: resolvedCodexStatus.available,
     gemini: Boolean(executableOnPath("gemini", env)),
     claude: Boolean(executableOnPath("claude", env)),
     opencode: Boolean(executableOnPath("opencode", env)),
@@ -827,7 +797,11 @@ function availableProviders(
   };
 }
 
-function chooseProvider(requested, env = process.env, codexContext = undefined) {
+async function chooseProvider(
+  requested,
+  env = process.env,
+  codexContext = undefined,
+) {
   if (!PROVIDERS.includes(requested)) {
     throw new CliError(
       `Unknown provider ${JSON.stringify(requested)}. Use ${PROVIDERS.join(", ")}.`,
@@ -837,7 +811,7 @@ function chooseProvider(requested, env = process.env, codexContext = undefined) 
   if (requested !== "auto") {
     const available =
       requested === "codex"
-        ? availableProviders(env, codexContext).codex
+        ? (await availableProviders(env, codexContext)).codex
         : requested === "custom"
           ? Boolean(env.CODEX_REVIEW_LOOP_PROVIDER_COMMAND_JSON)
           : Boolean(executableOnPath(requested, env));
@@ -849,7 +823,7 @@ function chooseProvider(requested, env = process.env, codexContext = undefined) 
     }
     return requested;
   }
-  const available = availableProviders(env, codexContext);
+  const available = await availableProviders(env, codexContext);
   const selected = ["codex", "gemini", "claude", "opencode"].find(
     (provider) => available[provider],
   );
@@ -2266,8 +2240,8 @@ function assertCodexRequirementsSafe(contents, source) {
   }
 }
 
-function codexUsesLegacyProfiles(state, env) {
-  const version = run("codex", ["--version"], {
+async function detectCodexLegacyProfiles(state, env) {
+  const version = await runCodex(["--version"], {
     cwd: state.root,
     env,
     allowFailure: true,
@@ -2278,6 +2252,23 @@ function codexUsesLegacyProfiles(state, env) {
     throw new CliError("Cannot determine Codex profile compatibility.", 3);
   }
   return Number(versionMatch[1]) === 0 && Number(versionMatch[2]) < 134;
+}
+
+function codexUsesLegacyProfiles(state) {
+  if (!Object.hasOwn(state, "codexLegacyProfiles")) {
+    throw new CliError(
+      "Codex profile compatibility was not validated before configuration inspection.",
+      3,
+    );
+  }
+  return Boolean(state.codexLegacyProfiles);
+}
+
+async function prepareCodexState(state, env) {
+  if (!Object.hasOwn(state, "codexLegacyProfiles")) {
+    state.codexLegacyProfiles = await detectCodexLegacyProfiles(state, env);
+  }
+  return state;
 }
 
 function codexConfigFile(file) {
@@ -2562,7 +2553,7 @@ export function parseCodexFeatureList(output) {
   return features;
 }
 
-function runCodexFeatureList(root, env, disabledFeatures = []) {
+async function runCodexFeatureList(root, env, disabledFeatures = []) {
   const args = [
     "features",
     "list",
@@ -2573,7 +2564,7 @@ function runCodexFeatureList(root, env, disabledFeatures = []) {
   for (const override of codexRuntimePathOverrides(env.CODEX_HOME)) {
     args.push("-c", override);
   }
-  const result = run("codex", args, {
+  const result = await runCodex(args, {
     cwd: root,
     env,
     allowFailure: true,
@@ -2602,6 +2593,31 @@ export function codexPreflightTimeout(env) {
   );
 }
 
+function assertNonRotatingCodexIdentity(identity) {
+  let parsed;
+  try {
+    parsed = JSON.parse(identity.toString("utf8"));
+  } catch {
+    throw new CliError(
+      "Cannot safely classify file-backed Codex authentication. Configure Codex to use the OS keyring or a non-rotating API key.",
+      3,
+    );
+  }
+  if (
+    parsed &&
+    typeof parsed === "object" &&
+    typeof parsed.OPENAI_API_KEY === "string" &&
+    parsed.OPENAI_API_KEY.length > 0 &&
+    !parsed.tokens?.refresh_token
+  ) {
+    return;
+  }
+  throw new CliError(
+    "File-backed Codex OAuth credentials can rotate during a probe or review. Configure Codex to use the OS keyring or a non-rotating API key.",
+    3,
+  );
+}
+
 export function shareCodexIdentityForProbe(state, sourceEnv, temporaryHome) {
   const authOverrides = configuredCodexAuthOverrides(state, sourceEnv);
   if (authOverrides.includes('cli_auth_credentials_store="keyring"')) {
@@ -2614,6 +2630,7 @@ export function shareCodexIdentityForProbe(state, sourceEnv, temporaryHome) {
       MAX_CODEX_IDENTITY_BYTES,
       "Codex authentication identity",
     );
+    assertNonRotatingCodexIdentity(identity);
     const shared = path.join(temporaryHome, "auth.json");
     try {
       writeFileSync(shared, identity, { flag: "wx", mode: 0o600 });
@@ -2848,7 +2865,7 @@ function codexPreferenceArgs(preferences = {}) {
   return args;
 }
 
-function runCodexManagedConfigProbe(
+async function runCodexManagedConfigProbe(
   root,
   env,
   temporaryHome,
@@ -2885,7 +2902,7 @@ function runCodexManagedConfigProbe(
     missingSchema,
     "configuration preflight",
   );
-  const result = run("codex", args, {
+  const result = await runCodex(args, {
     cwd: root,
     env,
     allowFailure: true,
@@ -3036,7 +3053,7 @@ function assertCloudCodexConfigurationSafe(
   };
 }
 
-export function codexFeaturesForReview(
+export async function codexFeaturesForReview(
   state,
   env,
   storage,
@@ -3061,12 +3078,12 @@ export function codexFeaturesForReview(
       env,
       temporaryHome,
     );
-    const supported = inventory(state.root, probeEnv);
+    const supported = await inventory(state.root, probeEnv);
     const disabled = [...supported.keys()].filter((feature) =>
       codexFeatureRequiresIsolation(feature) &&
       supported.stages?.get(feature) !== "removed",
     );
-    const effective = inventory(state.root, probeEnv, disabled);
+    const effective = await inventory(state.root, probeEnv, disabled);
     const active = disabled.filter(
       (feature) => effective.get(feature) !== false,
     );
@@ -3080,7 +3097,7 @@ export function codexFeaturesForReview(
       managedInventory === runCodexManagedConfigProbe
         ? shareCodexIdentityForProbe(state, env, temporaryHome)
         : [];
-    const authenticated = managedInventory(
+    const authenticated = await managedInventory(
       state.root,
       probeEnv,
       temporaryHome,
@@ -3113,7 +3130,7 @@ export function codexFeaturesForReview(
       managedInventory === runCodexManagedConfigProbe &&
       Object.keys(reviewPreferences).length > 0
     ) {
-      runCodexManagedConfigProbe(
+      await runCodexManagedConfigProbe(
         state.root,
         probeEnv,
         temporaryHome,
@@ -3187,12 +3204,13 @@ export function codexReviewArgs(
   return args;
 }
 
-function providerInvocation(state, prompt, env, repo) {
+async function providerInvocation(state, prompt, env, repo) {
   switch (state.provider) {
     case "codex": {
+      await prepareCodexState(state, env);
       const mcpServers = codexMcpServersForReview(state, env);
       const preferenceContext = codexReviewPreferenceContext(state, env);
-      const disabledFeatures = codexFeaturesForReview(
+      const disabledFeatures = await codexFeaturesForReview(
         state,
         env,
         repo.storage,
@@ -3741,7 +3759,7 @@ async function startCommand(repo, options, env) {
   }
   const requestedProvider = options.provider ?? "auto";
   const isolateCodexConfig = Boolean(options["isolate-codex-config"]);
-  const provider = chooseProvider(requestedProvider, env, {
+  const provider = await chooseProvider(requestedProvider, env, {
     root: repo.root,
     storage: repo.storage,
     isolateCodexConfig,
@@ -3822,7 +3840,7 @@ async function reviewCommandWithLock(repo, env) {
   let invocation;
   let result;
   try {
-    invocation = providerInvocation(state, prompt, env, repo);
+    invocation = await providerInvocation(state, prompt, env, repo);
     state.round += 1;
     state.phase = "reviewing";
     state.lastReview = {
@@ -4992,8 +5010,8 @@ const COMPOSITE_AI_PROVIDER_IDENTITY = new RegExp(
   String.raw`\b(?:codex|gemini|chatgpt|gpt(?:-\d+(?:\.\d+)*)?|open[\s-]?ai|anthropic|opencode|(?:github[\s-]+)?copilot|cursor|windsurf|aider|codeium|tabnine|qodo|amazon\s+q|sourcegraph\s+cody|mistral|mixtral|deepseek|qwen|grok|xai|perplexity|cohere|llama|kimi|moonshot|minimax)\b`,
   "iu",
 );
-const GENERIC_AI_TRAILER_IDENTITY = /^(?:AI|LLM)\b/iu;
-const GENERIC_AI_TRAILER_PHRASE = /^(?:artificial intelligence|language model)\b/iu;
+const GENERIC_AI_TRAILER_IDENTITY = /(?:^(?:AI|LLM)$|\b(?:AI|LLM)\s+(?:assistant|agent|bot|coder|coding\s+assistant|pair\s+programmer|tool)\b)/iu;
+const GENERIC_AI_TRAILER_PHRASE = /\b(?:artificial intelligence|language model)\b/iu;
 const EXPLICIT_AI_AUTHORSHIP_PATTERNS = [
   new RegExp(DIRECT_AI_USE_AUTHORSHIP_SOURCE, "iu"),
   new RegExp(CONSULTED_AI_AUTHORSHIP_SOURCE, "iu"),
@@ -5318,7 +5336,7 @@ function finishCommand(repo, options) {
   };
 }
 
-function doctorCommand(env, cwd = process.cwd()) {
+async function doctorCommand(env, cwd = process.cwd()) {
   const requested = path.resolve(cwd);
   const topLevel = git(requested, ["rev-parse", "--show-toplevel"], {
     allowFailure: true,
@@ -5329,8 +5347,8 @@ function doctorCommand(env, cwd = process.cwd()) {
     root,
     ...(topLevel.status === 0 ? { storage: repository(root).storage } : {}),
   };
-  const codexStatus = codexAvailability(env, context);
-  const providers = availableProviders(env, context, codexStatus);
+  const codexStatus = await codexAvailability(env, context);
+  const providers = await availableProviders(env, context, codexStatus);
   return {
     status: Object.values(providers).some(Boolean) ? "ready" : "unavailable",
     cwd: root,
@@ -5403,7 +5421,7 @@ export async function main(argv, runtime = {}) {
 
     let result;
     if (command === "doctor") {
-      result = doctorCommand(env, options.cwd ?? process.cwd());
+      result = await doctorCommand(env, options.cwd ?? process.cwd());
     } else if (command === "check-commit-message") {
       result = checkCommitMessageCommand(options);
     } else {
@@ -5453,11 +5471,5 @@ export async function main(argv, runtime = {}) {
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(SKILL_SCRIPT)) {
-  process.exitCode =
-    process.argv[2] === INTERNAL_BOUNDED_CODEX_RUN
-      ? await boundedCodexRun(
-          Number(process.argv[3]),
-          process.argv.slice(4),
-        )
-      : await main(process.argv.slice(2));
+  process.exitCode = await main(process.argv.slice(2));
 }
