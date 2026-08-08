@@ -1,6 +1,6 @@
 {
   "name": "codex-review-loop",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Run an independent, provider-selectable review and repair loop until the current Git scope is clean.",
   "author": {
     "name": "Dheer Gupta",

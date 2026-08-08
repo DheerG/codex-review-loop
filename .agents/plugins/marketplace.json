@@ -9,7 +9,7 @@
     {
       "name": "codex-review-loop",
       "description": "Review the complete Git scope with Codex or another provider, repair findings, and repeat until clean.",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "source": {
         "source": "local",
         "path": "./plugins/codex-review-loop"
