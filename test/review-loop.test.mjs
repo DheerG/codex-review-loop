@@ -2991,6 +2991,8 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     "Claude contributed this implementation",
     "Mistral generated this patch",
     "DeepSeek authored these changes",
+    "Implemented after consulting Codex",
+    "Implemented after asking Claude",
     "Preserve retries per Codex",
     "Preserve retries on reviewer advice",
     "Preserve retries at the reviewer’s request",
@@ -3010,7 +3012,13 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     assert.match(result.stdout, /AI-workflow attribution/u);
   }
 
-  for (const workflowSubject of ["Fix review issues", "Apply review fixes"]) {
+  for (const workflowSubject of [
+    "Fix review issues",
+    "Apply review fixes",
+    "Address pull request review comments",
+    "Apply PR review feedback",
+    "Resolve code review comments",
+  ]) {
     result = invoke(
       directory,
       env,
@@ -3023,6 +3031,19 @@ test("check-commit-message validates a proposed repair commit", (t) => {
     assert.equal(result.status, 2);
     assert.match(result.stdout, /review workflow/u);
   }
+
+  result = invoke(
+    directory,
+    env,
+    "check-commit-message",
+    "--subject",
+    "AI assistant generated reports retain metadata",
+    "--body",
+    narrativeCommitBody,
+    "--product-terms",
+    "The repository stores reports produced by its assistant product",
+  );
+  assert.equal(result.status, 0, result.stdout);
 
   result = invoke(
     directory,

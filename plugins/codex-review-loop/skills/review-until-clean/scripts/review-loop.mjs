@@ -4092,7 +4092,7 @@ const WORKFLOW_ATTRIBUTION_PATTERNS = [
   /\breview(?:er)?[ -]?round\s*#?\d+\b/iu,
 ];
 
-const PRODUCT_PROVENANCE_IDENTITY_SOURCE = String.raw`(?:ai|llm|reviewer|codex|claude|gemini|chatgpt|gpt(?:-\d+(?:\.\d+)*)?|open[\s-]?ai|anthropic|opencode|(?:github\s+)?copilot)`;
+const PRODUCT_PROVENANCE_IDENTITY_SOURCE = String.raw`(?:${AI_ATTRIBUTION_IDENTITY_SOURCE})(?:[\s-]+(?:assistant|agent|reviewer|bot|tool|model))?`;
 const PRODUCT_PROVENANCE_ARTIFACT_SOURCE = String.raw`(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance|reviews?|responses?|outputs?|results?|reports?|metadata|artifacts?|records?|events?|diagnostics?)`;
 const PRODUCT_PROVENANCE_SOURCE = String.raw`\b${PRODUCT_PROVENANCE_IDENTITY_SOURCE}[\s-]+(?:generated|authored|written|created|produced)\s+(?:review\s+)?${PRODUCT_PROVENANCE_ARTIFACT_SOURCE}\b`;
 const PASSIVE_PRODUCT_PROVENANCE_SOURCE = String.raw`\b${PRODUCT_PROVENANCE_ARTIFACT_SOURCE}\s+(?:generated|authored|written|created|produced)\s+by\s+(?:(?:an?|the)\s+)?${PRODUCT_PROVENANCE_IDENTITY_SOURCE}\b`;
@@ -4979,6 +4979,7 @@ function longCommitProseLine(body, allowProductTerms = false) {
 
 const AI_AUTHORSHIP_ACTION_SOURCE = String.raw`(?:reviewed|generated|suggested|assisted|authored|co[ -]?authored|written|wrote|created|made|produced|suppl(?:y|ies|ied|ying)|contribut(?:e|es|ed|ing)|fix(?:es|ed|ing)?|build(?:s|ing)?|built|implement(?:s|ed|ing)?|develop(?:s|ed|ing)?|programmed|pair[ -]?programmed|help(?:ed|s|ing)?(?:\s+(?:to\s+)?author)?)`;
 const DIRECT_AI_USE_AUTHORSHIP_SOURCE = String.raw`\b(?:use|uses|used|using)\s+(?:(?:an?|the)\s+)?${AI_ATTRIBUTION_IDENTITY_SOURCE}\b.{0,40}\b(?:to\s+)?${AI_AUTHORSHIP_ACTION_SOURCE}\b`;
+const CONSULTED_AI_AUTHORSHIP_SOURCE = String.raw`\b${AI_AUTHORSHIP_ACTION_SOURCE}\b.{0,50}\b(?:after|following)\s+(?:(?:consulting|asking|querying|prompting)\s+(?:(?:an?|the)\s+)?${AI_ATTRIBUTION_IDENTITY_SOURCE}\b|(?:consultation|discussion)\s+with\s+(?:(?:an?|the)\s+)?${AI_ATTRIBUTION_IDENTITY_SOURCE}\b)`;
 const AI_ATTRIBUTION_IDENTITY = new RegExp(
   String.raw`\b${AI_ATTRIBUTION_IDENTITY_SOURCE}\b`,
   "iu",
@@ -4995,6 +4996,7 @@ const GENERIC_AI_TRAILER_IDENTITY = /^(?:AI|LLM)\b/iu;
 const GENERIC_AI_TRAILER_PHRASE = /^(?:artificial intelligence|language model)\b/iu;
 const EXPLICIT_AI_AUTHORSHIP_PATTERNS = [
   new RegExp(DIRECT_AI_USE_AUTHORSHIP_SOURCE, "iu"),
+  new RegExp(CONSULTED_AI_AUTHORSHIP_SOURCE, "iu"),
   new RegExp(
     String.raw`\b${AI_AUTHORSHIP_ACTION_SOURCE}\b.{0,50}\b(?:by|with|using|via|from)\s+(?:(?:an?|the)\s+)?${AI_ATTRIBUTION_IDENTITY_SOURCE}\b`,
     "iu",
@@ -5007,6 +5009,7 @@ const EXPLICIT_AI_AUTHORSHIP_PATTERNS = [
 const CHANGE_AUTHORSHIP_OBJECT_SOURCE = String.raw`(?:changes?|code|implementation|commits?|patch|message|work)`;
 const PRODUCT_EXCEPTION_AI_AUTHORSHIP_PATTERNS = [
   new RegExp(DIRECT_AI_USE_AUTHORSHIP_SOURCE, "iu"),
+  new RegExp(CONSULTED_AI_AUTHORSHIP_SOURCE, "iu"),
   new RegExp(
     String.raw`\b${AI_ATTRIBUTION_IDENTITY_SOURCE}\b[\s-]+${AI_AUTHORSHIP_ACTION_SOURCE}\b`,
     "iu",
@@ -5114,10 +5117,10 @@ function inspectCommitMessageWithPolicy(subject, body, options) {
     issues.push("subject must be a single line");
   }
   if (
-    /\b(?:address(?:es|ed|ing)?|appl(?:y|ies|ied|ying)|fix(?:es|ed|ing)?|resolv(?:e|es|ed|ing)|handl(?:e|es|ed|ing)|incorporat(?:e|es|ed|ing)|implement(?:s|ed|ing)?|clos(?:e|es|ed|ing)|clear(?:s|ed|ing)?|tackl(?:e|es|ed|ing)|satisf(?:y|ies|ied|ying))\s+(?:the\s+)?(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?review(?:er)?\s+(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance)\b/iu.test(
+    /\b(?:address(?:es|ed|ing)?|appl(?:y|ies|ied|ying)|fix(?:es|ed|ing)?|resolv(?:e|es|ed|ing)|handl(?:e|es|ed|ing)|incorporat(?:e|es|ed|ing)|implement(?:s|ed|ing)?|clos(?:e|es|ed|ing)|clear(?:s|ed|ing)?|tackl(?:e|es|ed|ing)|satisf(?:y|ies|ied|ying))\s+(?:the\s+)?(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?(?:(?:pull\s+request|pr|code)\s+)?review(?:er)?\s+(?:feedback|findings?|comments?|suggestions?|requests?|recommendations?|instructions?|guidance)\b/iu.test(
       subject,
     ) ||
-    /\b(?:address(?:es|ed|ing)?|appl(?:y|ies|ied|ying)|fix(?:es|ed|ing)?)\s+(?:the\s+)?(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?review(?:er)?\s+(?:issues?|fixes?)\b/iu.test(
+    /\b(?:address(?:es|ed|ing)?|appl(?:y|ies|ied|ying)|fix(?:es|ed|ing)?)\s+(?:the\s+)?(?:(?:codex|claude|gemini|chatgpt|openai|anthropic|opencode)\s+)?(?:(?:pull\s+request|pr|code)\s+)?review(?:er)?\s+(?:issues?|fixes?)\b/iu.test(
       subject,
     ) ||
     /\b(?:review(?:er)?[ -]?round|codex fixes|claude fixes|ai review)\b/iu.test(
