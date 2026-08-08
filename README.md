@@ -10,10 +10,12 @@ Codex is the preferred reviewer. Gemini CLI, Claude Code, OpenCode, and a custom
 - Repairs never narrow the next round to only the latest patch.
 - The reviewer cannot write; the host agent owns edits, verification, and triage.
 - Empty or malformed reviewer output is not clean.
+- Native Codex review preserves only the user's configured model and reasoning effort.
+- Codex-native explicit clean verdicts are accepted without weakening other providers' output contracts.
 - A clean result is bound to a content snapshot. Editing afterward invalidates it.
 - Runtime state and raw rounds live below the target repository's Git directory.
 - There is no Stop hook, daemon, cron job, scheduled task, timer, or heartbeat.
-- A hygiene gate catches whitespace, weak or workflow-narrating commit messages, AI co-author trailers, and attribution added to product artifacts.
+- A prospective commit-message check keeps review-fix commits product-focused without rewriting existing history.
 
 ## Requirements
 
@@ -159,7 +161,7 @@ The planner does not pretend to execute the loop. The execution step runs after 
 
 ## Direct command
 
-The agent-facing skill drives repairs. The companion command provides the durable review state, independent provider call, response validation, and hygiene enforcement:
+The agent-facing skill drives repairs. The companion command provides durable review state, independent provider calls, response validation, and a prospective check for review-fix commit messages:
 
 ```sh
 npm link
@@ -172,7 +174,12 @@ codex-review-loop doctor
 codex-review-loop start --outcome "Preserve the public API while fixing retries"
 codex-review-loop review
 codex-review-loop status
-codex-review-loop hygiene
+# After a finding is repaired, and only when a commit is already authorized:
+codex-review-loop check-commit-message \
+  --subject "Preserve errors across retry exhaustion" \
+  --body-file /tmp/proposed-commit-body.txt
+# Create the repair commit, then review the resulting snapshot:
+codex-review-loop review
 codex-review-loop finish --reason clean
 ```
 
@@ -183,7 +190,9 @@ node plugins/codex-review-loop/skills/review-until-clean/scripts/review-loop.mjs
   start --outcome "Preserve the public API while fixing retries"
 ```
 
-`finish --reason clean` rejects an unclean last result, a changed post-review snapshot, and failed hygiene.
+`doctor` reports provider availability after the same Codex isolation preflight used by `start`, resolves a repository subdirectory to its Git top level, honors `--cwd` outside repositories, and includes a Codex rejection reason when managed configuration is unsafe. `finish --reason clean` rejects an unclean last result or a changed post-review snapshot. It never scans or rewrites commit history after a clean review.
+
+Each `review` command invokes exactly one reviewer round. `start` resolves the selected comparison ref to an immutable commit before storing the run, so later repair commits cannot move its boundary. Older active runs resolve their stored ref during migration and fail closed if its original commit cannot be proven; the current checkout is never substituted for an unknown historical ref. `finish --reason stopped` remains available to archive that state. An invalid response exits nonzero because it is not clean; inspect the returned status before retrying. Do not attach a shell `||` fallback to `review`, because that can mistake an invalid result for a failed invocation and consume an unintended second round.
 
 ## Providers
 
@@ -194,6 +203,12 @@ node plugins/codex-review-loop/skills/review-until-clean/scripts/review-loop.mjs
 3. Claude Code
 4. OpenCode
 
+Codex runs in native review mode, forces `never` approval, clears legacy notification commands, and applies a default-deny policy to optional features. It uses the native read-only sandbox unless managed policy selects Codex's built-in `:read-only` permission profile; in that case the adapter relies on the profile and omits the conflicting sandbox override. Only model-transport behavior and sandboxed local shell inspection are retained; lifecycle hooks, external/browser/computer tools, apps, plugins, approval guardians, dependency installers, searches, and current or legacy multi-agent features are disabled. Before invoking the reviewer, the adapter verifies every supported disable, so higher-precedence managed configuration cannot silently restore write-capable or externally side-effecting tools. User configuration is ignored by the reviewer process except for statically allowlisted `review_model`, `model`, and `model_reasoning_effort` values, which are passed as CLI overrides; `review_model` and selected legacy-profile values take precedence for native review, and `--isolate-codex-config` omits all three preferences. If a copied model depends on a custom provider, a built-in endpoint override, or a model catalog that isolation removes, preflight fails with guidance to isolate preferences or change that configuration. The target project is forced untrusted, and user/project execpolicy rules are ignored, so branch-controlled `.codex/config.toml`, hooks, rules, and prompt instructions are never loaded or read by the adapter. System TOML is read through a regular-file and one-megabyte bound to discover MCP server names; prompt-affecting settings, including personalities and model catalogs, and automated-approval settings fail closed. System and macOS MDM `requirements.toml` layers are bounded and checked for compatibility with read-only execution, `never` approval, user-owned approval review, built-in `:read-only` permission profiles, and disabled reviewer features before provider selection. Every accepted server name is disabled without launching a process, contacting an endpoint, or forwarding URLs, commands, credentials, or transport details. Managed MCP definitions, notification commands, write-capable sandbox settings, custom or write-capable default-permission profiles, automated approval settings, trusted-project settings, prompt overrides, or forced reviewer features fail closed; only the built-in `:read-only` default-permission profile is accepted. This includes machine policy under ProgramData or the real Codex home on Windows.
+
+Because `codex features list` cannot ignore user config, every run enumerates the binary's static feature names through a private temporary Codex home below Git runtime state. The adapter copies only file-backed authentication identity into that home or propagates the user's keyring storage selection, then performs a configuration-only Codex preflight that resolves cloud policy and exits on a deliberately absent output schema before starting a session, model call, MCP transport, hook, or reviewer tool. Feature and cloud-policy probes are bounded by the smaller of 60 seconds and the configured review timeout, so provider selection can fail or fall back instead of hanging. Both current cloud bundles and the legacy `cloud-requirements-cache.json` shape are bounded and checked. Cloud-managed config fragments and requirements use the same fail-closed policy, including merged-layer legacy-profile and allowlisted-preference resolution, rejection of cloud-defined MCP transports, and rejection of forced unsafe features. The actual reviewer reuses that authenticated policy snapshot, and every exit after retention deletes the temporary identity and cache. Native Codex prose, the official single-finding rendering, and the exact structured review object are validated without accepting ambiguous clean language. The installed feature inventory still determines which disable flags are supported by older compatible releases. Codex has no default round cap; other providers stop at 15 rounds unless `--max-rounds` is supplied.
+
+The Codex adapter recognizes structurally isolated native clean verdicts such as `No actionable defects found.`, including a Markdown-formatted `Verdict:` or `Result:` label. Other providers remain bound to the exact clean sentinel. For every provider, the clean verdict must be the sole non-empty output line.
+
 Use `--provider custom` with a directly executed JSON command:
 
 ```sh
@@ -203,18 +218,26 @@ codex-review-loop start --provider custom --outcome "..."
 
 The review prompt is sent to standard input. Custom provider sandboxing is the operator's responsibility.
 
-## Hygiene policy
+## Review-fix commit policy
 
-Fixes should read as intentional product work. Do not add “found by Codex,” “AI suggested,” or “review round” narration to code comments, docs, strings, tests, commits, or trailers. Commit subjects describe product behavior and commits are grouped by behavior or root cause, not reviewer round.
+Fixes should read as intentional product work. Do not add “found by Codex,” “AI suggested,” or “review round” narration to code comments, docs, strings, tests, commits, or trailers.
 
-Projects that genuinely implement reviewer-provider behavior can justify product-domain terms for the exact snapshot:
+- Existing branch history is immutable input. The loop never audits its message quality or requires an amend, rebase, squash, or commit recreation to pass a post-review gate.
+- If a repair commit is already authorized, create it before the next review and group it by product behavior or root cause, not reviewer round.
+- Resolve message guidance prospectively: explicit user instructions first, then explicit repository rules, then the plugin default. Repository rules apply where they speak; the default fills unspecified fields. Existing messages are examples, not a policy or compliance target.
+- By default, use an imperative subject of at most 72 characters with no trailing period. Use `Failure:`, `Change:`, and `Verification:` body sections, plus `Rationale:` when the implementation choice is non-obvious.
+- Preserve the triggering scenario, consequence, resulting behavior, sibling coverage, and exact checks run. Do not defend the change or discuss the review process.
+- Review the repository again after creating the commit, because the commit changes the bound Git snapshot.
+
+Validate the proposed message before committing:
 
 ```sh
-codex-review-loop hygiene \
-  --justify-product-terms "The product exposes reviewer-provider configuration"
+codex-review-loop check-commit-message \
+  --subject "Preserve errors across retry exhaustion" \
+  --body-file /tmp/proposed-commit-body.txt
 ```
 
-The exception never waives whitespace or commit-message quality failures.
+When explicit user or repository guidance overrides a default field, identify it with `--policy "<user instruction or repository source>"` and `--policy-overrides subject`, `body`, or `all`. Defaults remain active for every field not named by the override, while prospective-only and no-workflow-narration safeguards always remain active. If the repository itself implements reviewer-provider behavior, `--product-terms "<justification>"` permits legitimate product names in that proposal without permitting attribution grammar or AI co-authoring. The command checks only the supplied proposal; it never reads, grades, or mutates Git history. Once a commit exists, leave it unchanged and apply any improvement to the next proposal.
 
 ## Development
 

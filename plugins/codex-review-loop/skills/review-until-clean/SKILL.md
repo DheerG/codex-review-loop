@@ -43,32 +43,45 @@ From the target repository:
    node <skill-dir>/scripts/review-loop.mjs start --provider auto --outcome "<approved outcome>"
    ```
 
-   Add `--base <ref>` only when needed. An active run is resumable with `status`; never start a second run over it.
+   Add `--base <ref>` only when needed. The engine resolves the selected ref to an immutable commit before storing the run, so later repair commits cannot move the comparison boundary. Codex preserves only the user's allowlisted model and reasoning-effort preferences, forces the target project untrusted, forces approvals to `never`, clears notification commands, and default-denies every supported optional feature except model transport and sandboxed local inspection; it also disables statically discovered system MCP servers. Add `--isolate-codex-config` to omit even the allowlisted user preferences. Managed MCP definitions, notification commands, write-capable sandbox/default-permission settings, automated approval settings, trusted-project settings, prompt overrides, or forced reviewer features fail closed. An active run is resumable with `status`; never start a second run over it.
 
-3. Invoke one independent review:
+3. Before the first review, run the repository's complete relevant verification, including its diff or whitespace checks when available. Complete any resulting fixes before invoking the reviewer:
 
    ```sh
    node <skill-dir>/scripts/review-loop.mjs review
    ```
 
-4. Relay the reviewer's complete output verbatim before making fixes, then add a one-line disposition: fix, out of scope, ambiguous, invalid response, or provider failure. A clean round is relayed too.
+4. Each `review` invocation is exactly one round. Never shell-chain it with a fallback or another review. Before any fix edit, relay one contiguous leading block: `Round N — independent review`, the complete reviewer output verbatim, then a forward-looking disposition such as `Fixing N in-scope; M filed out-of-scope`, `Clean — loop terminating`, or `Invalid response — retrying once`. Relay clean and invalid rounds too.
 
-5. Triage every finding against the outcome. Fix in-scope functional defects at their cause, not merely at the cited line. Preserve unrelated user changes. Run the smallest relevant verification after each repair set.
+5. Triage every finding against the outcome. For each in-scope defect, state the violated rule and search reachable sibling sites before editing; fix the class, not merely the cited line. If the class recurs at new locations, centralize the invariant when the outcome requires it or surface the bounded remainder as out of scope. Preserve unrelated user changes. Verify the repair changed the intended behavior—a successful build or a no-op replacement is insufficient.
 
-6. Re-run `review`. Each round reviews the full current scope, not only the latest patch. Continue until the engine returns `clean`.
+6. Before the next review, rerun the repository's complete relevant verification. If commits are already authorized and the repairs should be committed, create new product-focused repair commits grouped by behavior or root cause. Existing commits are immutable workflow input: never grade their messages or amend, rebase, squash, or recreate them to satisfy this workflow.
 
-7. If all valid findings are out of scope, stop and surface them. If the engine reports oscillation, a round limit, an invalid response, or a provider failure, follow the escalation rules in the protocol. Never reinterpret those states as clean.
+   Resolve the prospective message policy from explicit user instructions, then explicit repository guidance, then the plugin default in [hygiene.md](references/hygiene.md). Apply repository rules where they speak and use the default for unspecified fields. Git history is a weak style hint, not a policy source or compliance target. Do not scan it for compliance. If an already-visible message differs, at most note once that it remains unchanged and the effective policy applies only to future proposals.
 
-8. Run repository verification, then enforce hygiene:
+   Under the default, write `Failure:`, `Change:`, and `Verification:` sections; add `Rationale:` when the implementation choice is non-obvious. Preserve the triggering scenario, consequence, resulting behavior, sibling coverage, and exact verification rather than compressing them into a vague summary. Check the proposal before creating the commit:
 
    ```sh
-   node <skill-dir>/scripts/review-loop.mjs hygiene
+   node <skill-dir>/scripts/review-loop.mjs check-commit-message \
+     --subject "<product behavior>" \
+     --body-file "<path-to-proposed-body>"
+   ```
+
+   When explicit user or repository guidance conflicts with a default field, add `--policy "<user instruction or repository source>"` and `--policy-overrides subject`, `body`, or `all`. Defaults remain active for fields not named by the override, and prospective-only/no-workflow-narration safeguards always remain active. If the product itself exposes reviewer-provider behavior and its legitimate names trigger the broad attribution check, add `--product-terms "<why these names describe the product>"`; this never permits attribution grammar or AI co-authoring. Only create the commit when the proposal is clean. Do not stage unrelated user changes. Once a commit exists, do not run the check against it—apply any improvement to the next proposal instead.
+
+7. Re-run `review` after all repairs, verification, and any authorized commit. Each command invokes exactly one reviewer round over the full current scope, not only the latest patch. Continue until the engine returns `clean`.
+
+8. If all valid findings are out of scope, stop and surface them. If the engine reports oscillation, a round limit, an invalid response, or a provider failure, follow the escalation rules in the protocol. Never reinterpret those states as clean.
+
+9. After a clean result, do not edit, format, stage, commit, amend, or rebase. Finish the exact reviewed snapshot:
+
+   ```sh
    node <skill-dir>/scripts/review-loop.mjs finish --reason clean
    ```
 
-   `finish --reason clean` succeeds only when the current snapshot is exactly the snapshot that received a clean review and hygiene passes. Any later edit requires another review.
+   `finish --reason clean` succeeds only when the current snapshot is exactly the snapshot that received the clean review. Any later Git-scope change requires another review.
 
-9. Report the provider, round count, final verification, and any explicitly accepted out-of-scope items. Do not advertise the workflow in product code, code comments, documentation, commit subjects, commit bodies, or trailers.
+10. Report the provider, round count, final verification, and any explicitly accepted out-of-scope items. Do not advertise the workflow in product code, code comments, documentation, commit subjects, commit bodies, or trailers.
 
 ## Stop and resume
 
